@@ -213,8 +213,10 @@ async def create_bookclub(interaction: discord.Interaction):
         # Create the book club
         await channel.send(f"Creating book club for **{book_name}** with {len(chapters)} chapters and {len(members)} members...")
         
-        # Create text channel
+        # Create text channel in the same category as the current channel
         guild = interaction.guild
+        category = interaction.channel.category if hasattr(interaction.channel, 'category') else None
+        
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
@@ -226,7 +228,8 @@ async def create_bookclub(interaction: discord.Interaction):
         
         book_channel = await guild.create_text_channel(
             name=book_name.lower().replace(' ', '-'),
-            overwrites=overwrites
+            overwrites=overwrites,
+            category=category
         )
         
         # Send welcome message
