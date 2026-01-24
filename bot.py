@@ -95,7 +95,9 @@ async def generate_guide_content(book_club, guild):
         except Exception as e:
             guide_parts.append(f"\n## {chapter}\n*Error retrieving messages*")
     
-    return "\n".join(guide_parts)
+    # Wrap entire guide content in spoiler tags
+    full_content = "\n".join(guide_parts)
+    return f"||{full_content}||"
 
 async def update_discussion_guide(book_club, guild):
     """Update the live discussion guide, splitting into multiple messages if needed"""
@@ -253,7 +255,7 @@ async def create_bookclub(interaction: discord.Interaction):
             thread_ids[chapter] = thread.id
         
         # Create initial discussion guide message
-        guide_msg = await book_channel.send(f"# Discussion Guide: {book_name}\n\n*No comments yet. The guide will update automatically as people comment!*")
+        guide_msg = await book_channel.send(f"||# Discussion Guide: {book_name}\n\n*No comments yet. The guide will update automatically as people comment!*||")
         
         # Store book club data
         book_club_id = f"{guild.id}_{book_channel.id}"
