@@ -69,6 +69,21 @@ async def on_message(message):
     
     await bot.process_commands(message)
 
+@bot.event
+async def on_message_edit(before, after):
+    # Ignore bot messages
+    if after.author.bot:
+        return
+    
+    # Check if edited message is in a thread that belongs to a book club
+    if isinstance(after.channel, discord.Thread):
+        # Find which book club this thread belongs to
+        for book_club_id, book_club in book_clubs.items():
+            if after.channel.id in book_club.thread_ids.values():
+                # Update the discussion guide
+                await update_discussion_guide(book_club, after.guild)
+                break
+
 async def generate_guide_content(book_club, guild):
     """Generate the discussion guide content"""
     guide_parts = [f"# Discussion Guide: {book_club.book_name}\n"]
@@ -85,9 +100,21 @@ async def generate_guide_content(book_club, guild):
             async for msg in thread.history(limit=None, oldest_first=True):
                 if msg.author.bot or msg.type != discord.MessageType.default:
                     continue
+                
                 # Remove spoiler tags from content
                 clean_content = msg.content.replace('||', '')
-                messages.append(f"**{msg.author.display_name}**: {clean_content}")
+                
+                # Check if this is a reply to another message
+                if msg.reference and msg.reference.message_id:
+                    try:
+                        replied_msg = await thread.fetch_message(msg.reference.message_id)
+                        replied_author = replied_msg.author.display_name
+                        messages.append(f"  **{msg.author.display_name}** (replying to {replied_author}): {clean_content}")
+                    except:
+                        # If we can't fetch the replied message, just show it as a regular message
+                        messages.append(f"**{msg.author.display_name}**: {clean_content}")
+                else:
+                    messages.append(f"**{msg.author.display_name}**: {clean_content}")
             
             if messages:
                 guide_parts.append(f"\n## {chapter}\n" + "\n".join(messages))
