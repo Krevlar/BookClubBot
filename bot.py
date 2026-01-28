@@ -1,6 +1,8 @@
 import discord
 from discord.ext import commands
 import asyncio
+import json
+import os
 
 # Bot setup
 intents = discord.Intents.default()
@@ -10,6 +12,40 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Store book club data
 book_clubs = {}
+DATA_FILE = 'bookclubs.json'
+
+def save_book_clubs():
+    """Save book clubs to file"""
+    data = {}
+    for book_club_id, book_club in book_clubs.items():
+        data[book_club_id] = {
+            'guild_id': book_club.guild_id,
+            'book_name': book_club.book_name,
+            'channel_id': book_club.channel_id,
+            'thread_ids': book_club.thread_ids,
+            'members': book_club.members,
+            'chapters': book_club.chapters,
+            'guide_message_ids': book_club.guide_message_ids
+        }
+    with open(DATA_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+
+def load_book_clubs():
+    """Load book clubs from file"""
+    global book_clubs
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, 'r') as f:
+            data = json.load(f)
+            for book_club_id, bc_data in data.items():
+                book_clubs[book_club_id] = BookClub(
+                    bc_data['guild_id'],
+                    bc_data['book_name'],
+                    bc_data['channel_id'],
+                    bc_data['thread_ids'],
+                    bc_data['members'],
+                    bc_data['chapters'],
+                    bc_data['guide_message_ids']
+                )
 
 def parse_chapters(chapter_string):
     """Parse chapter string like 'Prologue, 1-5, Epilogue' into a list of chapter names"""
@@ -46,6 +82,8 @@ class BookClub:
 @bot.event
 async def on_ready():
     print(f'{bot.user} is now running!')
+    load_book_clubs()
+    print(f'Loaded {len(book_clubs)} book club(s)')
     try:
         synced = await bot.tree.sync()
         print(f'Synced {len(synced)} command(s)')
@@ -296,6 +334,9 @@ async def create_bookclub(interaction: discord.Interaction):
             [guide_msg.id]
         )
         
+        # Save to file
+        save_book_clubs()
+        
         await channel.send(f"✅ Book club created! Check out {book_channel.mention}")
         
     except asyncio.TimeoutError:
@@ -333,6 +374,9 @@ async def add_member(interaction: discord.Interaction, member: discord.Member):
             pass
     
     book_club.members.append(member.id)
+    
+    # Save to file
+    save_book_clubs()
     
     await interaction.response.send_message(f"✅ Added {member.mention} to the book club!", ephemeral=True)
 
