@@ -162,9 +162,19 @@ async def on_ready():
     load_book_clubs()
     load_directories()
     load_archive_categories()
+    
+    # Load active categories
+    bot.active_categories = {}
+    active_file = 'active_categories.json'
+    if os.path.exists(active_file):
+        with open(active_file, 'r') as f:
+            data = json.load(f)
+            bot.active_categories = {int(k): int(v) for k, v in data.items()}
+    
     print(f'Loaded {len(book_clubs)} book club(s)')
     print(f'Loaded {len(directory_channels)} directory channel(s)')
     print(f'Loaded {len(archive_categories)} archive category(ies)')
+    print(f'Loaded {len(bot.active_categories)} active category(ies)')
     try:
         synced = await bot.tree.sync()
         print(f'Synced {len(synced)} command(s)')
@@ -525,6 +535,24 @@ async def set_archive_category(interaction: discord.Interaction, category: disco
     
     await interaction.response.send_message(f"✅ Book clubs will be archived to **{category.name}**!", ephemeral=True)
 
+@bot.tree.command(name="set_active_category", description="Set a category for active book clubs")
+async def set_active_category(interaction: discord.Interaction, category: discord.CategoryChannel):
+    """Set the category where active book clubs should be placed"""
+    guild = interaction.guild
+    
+    # We'll store active categories similar to archive categories
+    if not hasattr(bot, 'active_categories'):
+        bot.active_categories = {}
+    
+    bot.active_categories[guild.id] = category.id
+    
+    # Save to a file
+    active_file = 'active_categories.json'
+    with open(active_file, 'w') as f:
+        json.dump(bot.active_categories, f, indent=2)
+    
+    await interaction.response.send_message(f"✅ Active book clubs will be moved to **{category.name}**!", ephemeral=True)
+
 @bot.tree.command(name="archive_bookclub", description="Archive this book club (moves to Old Books category)")
 async def archive_bookclub(interaction: discord.Interaction):
     """Archive the current book club"""
@@ -559,6 +587,54 @@ async def archive_bookclub(interaction: discord.Interaction):
     
     except Exception as e:
         await interaction.response.send_message(f"Error archiving book club: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="unarchive_bookclub", description="Unarchive this book club (moves back to active)")
+async def unarchive_bookclub(interaction: discord.Interaction):
+    """Unarchive the current book club and move it back to active"""
+    # Check if current channel is a book club
+    book_club_id = f"{interaction.guild.id}_{interaction.channel.id}"
+    if book_club_id not in book_clubs:
+        await interaction.response.send_message("This command must be used in a book club channel.", ephemeral=True)
+        return
+    
+    book_club = book_clubs[book_club_id]
+    
+    # Check if it's actually archived
+    if not book_club.is_archived:
+        await interaction.response.send_message("This book club is already active!", ephemeral=True)
+        return
+    
+    try:
+        # Load active categories if not already loaded
+        if not hasattr(bot, 'active_categories'):
+            bot.active_categories = {}
+            active_file = 'active_categories.json'
+            if os.path.exists(active_file):
+                with open(active_file, 'r') as f:
+                    data = json.load(f)
+                    bot.active_categories = {int(k): int(v) for k, v in data.items()}
+        
+        # Check if active category is set
+        if interaction.guild.id in bot.active_categories:
+            # Move to active category
+            active_category = await interaction.guild.fetch_channel(bot.active_categories[interaction.guild.id])
+            await interaction.channel.edit(category=active_category)
+            message = f"✅ Book club unarchived and moved to **{active_category.name}**!"
+        else:
+            # No active category set, just unarchive without moving
+            message = "✅ Book club unarchived! (Use `/set_active_category` to automatically move unarchived books to a specific category)"
+        
+        # Mark as not archived
+        book_club.is_archived = False
+        save_book_clubs()
+        
+        # Update the directory
+        await update_book_club_list(interaction.guild)
+        
+        await interaction.response.send_message(message, ephemeral=True)
+    
+    except Exception as e:
+        await interaction.response.send_message(f"Error unarchiving book club: {str(e)}", ephemeral=True)
 
 @bot.tree.command(name="add_member", description="Add a member to this book club")
 async def add_member(interaction: discord.Interaction, member: discord.Member):
