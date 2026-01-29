@@ -55,8 +55,10 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 # Store book club data
 book_clubs = {}
 directory_channels = {}  # {guild_id: {'channel_id': id, 'message_id': id}}
+archive_categories = {}  # {guild_id: category_id}
 DATA_FILE = 'bookclubs.json'
 DIRECTORY_FILE = 'directories.json'
+ARCHIVE_FILE = 'archives.json'
 
 def save_book_clubs():
     """Save book clubs to file"""
@@ -69,7 +71,8 @@ def save_book_clubs():
             'thread_ids': book_club.thread_ids,
             'members': book_club.members,
             'chapters': book_club.chapters,
-            'guide_message_ids': book_club.guide_message_ids
+            'guide_message_ids': book_club.guide_message_ids,
+            'is_archived': book_club.is_archived
         }
     with open(DATA_FILE, 'w') as f:
         json.dump(data, f, indent=2)
@@ -78,6 +81,11 @@ def save_directories():
     """Save directory channels to file"""
     with open(DIRECTORY_FILE, 'w') as f:
         json.dump(directory_channels, f, indent=2)
+
+def save_archive_categories():
+    """Save archive categories to file"""
+    with open(ARCHIVE_FILE, 'w') as f:
+        json.dump(archive_categories, f, indent=2)
 
 def load_book_clubs():
     """Load book clubs from file"""
@@ -93,7 +101,8 @@ def load_book_clubs():
                     bc_data['thread_ids'],
                     bc_data['members'],
                     bc_data['chapters'],
-                    bc_data['guide_message_ids']
+                    bc_data['guide_message_ids'],
+                    bc_data.get('is_archived', False)
                 )
 
 def load_directories():
@@ -104,6 +113,15 @@ def load_directories():
             directory_channels = json.load(f)
             # Convert string keys to integers
             directory_channels = {int(k): v for k, v in directory_channels.items()}
+
+def load_archive_categories():
+    """Load archive categories from file"""
+    global archive_categories
+    if os.path.exists(ARCHIVE_FILE):
+        with open(ARCHIVE_FILE, 'r') as f:
+            archive_categories = json.load(f)
+            # Convert string keys to integers
+            archive_categories = {int(k): int(v) for k, v in archive_categories.items()}
 
 def parse_chapters(chapter_string):
     """Parse chapter string like 'Prologue, 1-5, Epilogue' into a list of chapter names"""
@@ -128,7 +146,7 @@ def parse_chapters(chapter_string):
     return chapters
 
 class BookClub:
-    def __init__(self, guild_id, book_name, channel_id, thread_ids, members, chapters, guide_message_ids=None):
+    def __init__(self, guild_id, book_name, channel_id, thread_ids, members, chapters, guide_message_ids=None, is_archived=False):
         self.guild_id = guild_id
         self.book_name = book_name
         self.channel_id = channel_id
@@ -136,14 +154,17 @@ class BookClub:
         self.members = members
         self.chapters = chapters
         self.guide_message_ids = guide_message_ids or []
+        self.is_archived = is_archived
 
 @bot.event
 async def on_ready():
     print(f'{bot.user} is now running!')
     load_book_clubs()
     load_directories()
+    load_archive_categories()
     print(f'Loaded {len(book_clubs)} book club(s)')
     print(f'Loaded {len(directory_channels)} directory channel(s)')
+    print(f'Loaded {len(archive_categories)} archive category(ies)')
     try:
         synced = await bot.tree.sync()
         print(f'Synced {len(synced)} command(s)')
@@ -242,19 +263,34 @@ async def update_book_club_list(guild):
         return
     
     # Get all book clubs for this guild
-    guild_book_clubs = [bc for bc in book_clubs.values() if bc.guild_id == guild.id]
+    all_book_clubs = [bc for bc in book_clubs.values() if bc.guild_id == guild.id]
+    active_clubs = [bc for bc in all_book_clubs if not bc.is_archived]
+    archived_clubs = [bc for bc in all_book_clubs if bc.is_archived]
     
     # Generate list content
-    if guild_book_clubs:
-        list_content = "# 📚 Active Book Clubs\n\n"
-        for book_club in sorted(guild_book_clubs, key=lambda x: x.book_name):
+    list_content = ""
+    
+    # Active book clubs section
+    if active_clubs:
+        list_content += "# 📚 Active Book Clubs\n\n"
+        for book_club in sorted(active_clubs, key=lambda x: x.book_name):
             try:
                 channel = await guild.fetch_channel(book_club.channel_id)
                 list_content += f"📖 **{book_club.book_name}** - {channel.mention}\n"
             except:
                 list_content += f"📖 **{book_club.book_name}** - *(channel not found)*\n"
     else:
-        list_content = "# 📚 Active Book Clubs\n\n*No book clubs yet. Use `/create_bookclub` to start one!*"
+        list_content += "# 📚 Active Book Clubs\n\n*No active book clubs. Use `/create_bookclub` to start one!*\n"
+    
+    # Past book clubs section
+    if archived_clubs:
+        list_content += "\n# 📕 Past Book Clubs\n\n"
+        for book_club in sorted(archived_clubs, key=lambda x: x.book_name):
+            try:
+                channel = await guild.fetch_channel(book_club.channel_id)
+                list_content += f"📕 **{book_club.book_name}** - {channel.mention}\n"
+            except:
+                list_content += f"📕 **{book_club.book_name}** - *(channel not found)*\n"
     
     # Update or create the directory message
     try:
@@ -477,6 +513,52 @@ async def set_directory(interaction: discord.Interaction):
     await update_book_club_list(guild)
     
     await interaction.response.send_message(f"✅ This channel is now the book club directory!", ephemeral=True)
+
+@bot.tree.command(name="set_archive_category", description="Set a category for archiving old book clubs")
+async def set_archive_category(interaction: discord.Interaction, category: discord.CategoryChannel):
+    """Set the category where archived book clubs will be moved"""
+    guild = interaction.guild
+    
+    # Store the archive category
+    archive_categories[guild.id] = category.id
+    save_archive_categories()
+    
+    await interaction.response.send_message(f"✅ Book clubs will be archived to **{category.name}**!", ephemeral=True)
+
+@bot.tree.command(name="archive_bookclub", description="Archive this book club (moves to Old Books category)")
+async def archive_bookclub(interaction: discord.Interaction):
+    """Archive the current book club"""
+    # Check if current channel is a book club
+    book_club_id = f"{interaction.guild.id}_{interaction.channel.id}"
+    if book_club_id not in book_clubs:
+        await interaction.response.send_message("This command must be used in a book club channel.", ephemeral=True)
+        return
+    
+    # Check if archive category is set
+    if interaction.guild.id not in archive_categories:
+        await interaction.response.send_message("No archive category set! Use `/set_archive_category` first.", ephemeral=True)
+        return
+    
+    book_club = book_clubs[book_club_id]
+    
+    try:
+        # Get the archive category
+        archive_category = await interaction.guild.fetch_channel(archive_categories[interaction.guild.id])
+        
+        # Move the channel to the archive category
+        await interaction.channel.edit(category=archive_category)
+        
+        # Mark as archived
+        book_club.is_archived = True
+        save_book_clubs()
+        
+        # Update the directory
+        await update_book_club_list(interaction.guild)
+        
+        await interaction.response.send_message(f"✅ Book club archived and moved to **{archive_category.name}**!", ephemeral=True)
+    
+    except Exception as e:
+        await interaction.response.send_message(f"Error archiving book club: {str(e)}", ephemeral=True)
 
 @bot.tree.command(name="add_member", description="Add a member to this book club")
 async def add_member(interaction: discord.Interaction, member: discord.Member):
