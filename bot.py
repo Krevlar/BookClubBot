@@ -299,8 +299,8 @@ async def update_book_club_list(guild):
     list_content = ""
     
     # Active book clubs section
+    list_content += "# 📚 Active Book Clubs\n\n"
     if active_clubs:
-        list_content += "# 📚 Active Book Clubs\n\n"
         for book_club in sorted(active_clubs, key=lambda x: x.book_name):
             try:
                 channel = await guild.fetch_channel(book_club.channel_id)
@@ -308,7 +308,7 @@ async def update_book_club_list(guild):
             except:
                 list_content += f"📖 **{book_club.book_name}** - *(channel not found)*\n"
     else:
-        list_content += "# 📚 Active Book Clubs\n\n*No active book clubs. Use `/create_bookclub` to start one!*\n"
+        list_content += "*No active book clubs. Use `/create_bookclub` to start one!*\n"
     
     # Past book clubs section
     if archived_clubs:
@@ -322,7 +322,7 @@ async def update_book_club_list(guild):
     
     # Manual book clubs section (not managed by bot)
     if guild.id in manual_book_clubs and manual_book_clubs[guild.id]:
-        list_content += "\n# 📚 Legacy Book Clubs\n*These channels were created manually and are not managed by the bot.*\n\n"
+        list_content += "\n# 📚 Legacy Book Clubs\n\n*These channels were created manually and are not managed by the bot.*\n\n"
         for manual_club in sorted(manual_book_clubs[guild.id], key=lambda x: x['name']):
             try:
                 channel = await guild.fetch_channel(manual_club['channel_id'])
