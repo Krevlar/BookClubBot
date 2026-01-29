@@ -56,9 +56,11 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 book_clubs = {}
 directory_channels = {}  # {guild_id: {'channel_id': id, 'message_id': id}}
 archive_categories = {}  # {guild_id: category_id}
+manual_book_clubs = {}  # {guild_id: [{'name': str, 'channel_id': int}]}
 DATA_FILE = 'bookclubs.json'
 DIRECTORY_FILE = 'directories.json'
 ARCHIVE_FILE = 'archives.json'
+MANUAL_FILE = 'manual_bookclubs.json'
 
 def save_book_clubs():
     """Save book clubs to file"""
@@ -86,6 +88,11 @@ def save_archive_categories():
     """Save archive categories to file"""
     with open(ARCHIVE_FILE, 'w') as f:
         json.dump(archive_categories, f, indent=2)
+
+def save_manual_book_clubs():
+    """Save manual book clubs to file"""
+    with open(MANUAL_FILE, 'w') as f:
+        json.dump(manual_book_clubs, f, indent=2)
 
 def load_book_clubs():
     """Load book clubs from file"""
@@ -122,6 +129,15 @@ def load_archive_categories():
             archive_categories = json.load(f)
             # Convert string keys to integers
             archive_categories = {int(k): int(v) for k, v in archive_categories.items()}
+
+def load_manual_book_clubs():
+    """Load manual book clubs from file"""
+    global manual_book_clubs
+    if os.path.exists(MANUAL_FILE):
+        with open(MANUAL_FILE, 'r') as f:
+            manual_book_clubs = json.load(f)
+            # Convert string keys to integers
+            manual_book_clubs = {int(k): v for k, v in manual_book_clubs.items()}
 
 def parse_chapters(chapter_string):
     """Parse chapter string like 'Prologue, 1-5, Epilogue' into a list of chapter names"""
@@ -162,6 +178,7 @@ async def on_ready():
     load_book_clubs()
     load_directories()
     load_archive_categories()
+    load_manual_book_clubs()
     
     # Load active categories
     bot.active_categories = {}
@@ -175,6 +192,7 @@ async def on_ready():
     print(f'Loaded {len(directory_channels)} directory channel(s)')
     print(f'Loaded {len(archive_categories)} archive category(ies)')
     print(f'Loaded {len(bot.active_categories)} active category(ies)')
+    print(f'Loaded {len(manual_book_clubs)} guild(s) with manual book clubs')
     try:
         synced = await bot.tree.sync()
         print(f'Synced {len(synced)} command(s)')
@@ -301,6 +319,16 @@ async def update_book_club_list(guild):
                 list_content += f"📕 **{book_club.book_name}** - {channel.mention}\n"
             except:
                 list_content += f"📕 **{book_club.book_name}** - *(channel not found)*\n"
+    
+    # Manual book clubs section (not managed by bot)
+    if guild.id in manual_book_clubs and manual_book_clubs[guild.id]:
+        list_content += "\n# 📚 Legacy Book Clubs\n*These channels were created manually and are not managed by the bot.*\n\n"
+        for manual_club in sorted(manual_book_clubs[guild.id], key=lambda x: x['name']):
+            try:
+                channel = await guild.fetch_channel(manual_club['channel_id'])
+                list_content += f"📘 **{manual_club['name']}** - {channel.mention}\n"
+            except:
+                list_content += f"📘 **{manual_club['name']}** - *(channel not found)*\n"
     
     # Update or create the directory message
     try:
@@ -635,6 +663,46 @@ async def unarchive_bookclub(interaction: discord.Interaction):
     
     except Exception as e:
         await interaction.response.send_message(f"Error unarchiving book club: {str(e)}", ephemeral=True)
+
+@bot.tree.command(name="import_legacy_books", description="Import all channels from a category as legacy book clubs")
+async def import_legacy_books(interaction: discord.Interaction, category: discord.CategoryChannel):
+    """Import all text channels from a category as legacy (manually created) book clubs"""
+    guild = interaction.guild
+    
+    # Get all text channels in the category
+    channels_in_category = [ch for ch in category.channels if isinstance(ch, discord.TextChannel)]
+    
+    if not channels_in_category:
+        await interaction.response.send_message(f"No text channels found in **{category.name}**.", ephemeral=True)
+        return
+    
+    # Initialize manual book clubs list for this guild if it doesn't exist
+    if guild.id not in manual_book_clubs:
+        manual_book_clubs[guild.id] = []
+    
+    # Add each channel to the manual book clubs list
+    imported_count = 0
+    for channel in channels_in_category:
+        # Check if already in manual list
+        already_exists = any(bc['channel_id'] == channel.id for bc in manual_book_clubs[guild.id])
+        if not already_exists:
+            manual_book_clubs[guild.id].append({
+                'name': channel.name.replace('-', ' ').title(),
+                'channel_id': channel.id
+            })
+            imported_count += 1
+    
+    # Save to file
+    save_manual_book_clubs()
+    
+    # Update the directory
+    await update_book_club_list(guild)
+    
+    await interaction.response.send_message(
+        f"✅ Imported {imported_count} legacy book club(s) from **{category.name}**!\n"
+        f"They will appear in the directory under 'Legacy Book Clubs'.",
+        ephemeral=True
+    )
 
 @bot.tree.command(name="add_member", description="Add a member to this book club")
 async def add_member(interaction: discord.Interaction, member: discord.Member):
