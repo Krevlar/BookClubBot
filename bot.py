@@ -1,3 +1,45 @@
+async def update_discussion_guide(book_club, guild):
+    """Update the live discussion guide, splitting into multiple messages if needed"""
+    if not book_club.guide_message_ids:
+        return
+    
+    try:
+        channel = await guild.fetch_channel(book_club.channel_id)
+        guide_content = await generate_guide_content(book_club, guild)
+        
+        # Split content into chunks of ~1900 characters (leaving buffer for safety)
+        chunks = split_into_chunks(guide_content, 1900)
+        
+        # Update existing messages or create new ones
+        for i, chunk in enumerate(chunks):
+            if i < len(book_club.guide_message_ids):
+                # Update existing message
+                try:
+                    msg = await channel.fetch_message(book_club.guide_message_ids[i])
+                    await msg.edit(content=chunk)
+                except:
+                    # If message was deleted, create a new one
+                    new_msg = await channel.send(chunk)
+                    book_club.guide_message_ids[i] = new_msg.id
+            else:
+                # Create new message for additional chunks
+                new_msg = await channel.send(chunk)
+                book_club.guide_message_ids.append(new_msg.id)
+        
+        # Delete extra messages if content got shorter
+        if len(chunks) < len(book_club.guide_message_ids):
+            for i in range(len(chunks), len(book_club.guide_message_ids)):
+                try:
+                    msg = await channel.fetch_message(book_club.guide_message_ids[i])
+                    await msg.delete()
+                except:
+                    pass
+            book_club.guide_message_ids = book_club.guide_message_ids[:len(chunks)]
+        
+        save_book_clubs()
+    
+    except Exception as e:
+        print(f"Error updating discussion guide: {e}")
 import discord
 from discord.ext import commands
 import asyncio
@@ -12,7 +54,9 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Store book club data
 book_clubs = {}
+directory_channels = {}  # {guild_id: {'channel_id': id, 'message_id': id}}
 DATA_FILE = 'bookclubs.json'
+DIRECTORY_FILE = 'directories.json'
 
 def save_book_clubs():
     """Save book clubs to file"""
@@ -30,6 +74,11 @@ def save_book_clubs():
     with open(DATA_FILE, 'w') as f:
         json.dump(data, f, indent=2)
 
+def save_directories():
+    """Save directory channels to file"""
+    with open(DIRECTORY_FILE, 'w') as f:
+        json.dump(directory_channels, f, indent=2)
+
 def load_book_clubs():
     """Load book clubs from file"""
     global book_clubs
@@ -46,6 +95,15 @@ def load_book_clubs():
                     bc_data['chapters'],
                     bc_data['guide_message_ids']
                 )
+
+def load_directories():
+    """Load directory channels from file"""
+    global directory_channels
+    if os.path.exists(DIRECTORY_FILE):
+        with open(DIRECTORY_FILE, 'r') as f:
+            directory_channels = json.load(f)
+            # Convert string keys to integers
+            directory_channels = {int(k): v for k, v in directory_channels.items()}
 
 def parse_chapters(chapter_string):
     """Parse chapter string like 'Prologue, 1-5, Epilogue' into a list of chapter names"""
@@ -83,7 +141,9 @@ class BookClub:
 async def on_ready():
     print(f'{bot.user} is now running!')
     load_book_clubs()
+    load_directories()
     print(f'Loaded {len(book_clubs)} book club(s)')
+    print(f'Loaded {len(directory_channels)} directory channel(s)')
     try:
         synced = await bot.tree.sync()
         print(f'Synced {len(synced)} command(s)')
@@ -165,7 +225,57 @@ async def generate_guide_content(book_club, guild):
     spoiler_content = "\n".join(guide_parts)
     return f"{header}||{spoiler_content}||"
 
-async def update_discussion_guide(book_club, guild):
+async def update_book_club_list(guild):
+    """Update the public book club directory for a guild"""
+    # Check if a directory channel exists for this guild
+    if guild.id not in directory_channels:
+        return
+    
+    directory_info = directory_channels[guild.id]
+    
+    try:
+        directory_channel = await guild.fetch_channel(directory_info['channel_id'])
+    except:
+        # Directory channel was deleted
+        del directory_channels[guild.id]
+        save_directories()
+        return
+    
+    # Get all book clubs for this guild
+    guild_book_clubs = [bc for bc in book_clubs.values() if bc.guild_id == guild.id]
+    
+    # Generate list content
+    if guild_book_clubs:
+        list_content = "# 📚 Active Book Clubs\n\n"
+        for book_club in sorted(guild_book_clubs, key=lambda x: x.book_name):
+            try:
+                channel = await guild.fetch_channel(book_club.channel_id)
+                list_content += f"📖 **{book_club.book_name}** - {channel.mention}\n"
+            except:
+                list_content += f"📖 **{book_club.book_name}** - *(channel not found)*\n"
+    else:
+        list_content = "# 📚 Active Book Clubs\n\n*No book clubs yet. Use `/create_bookclub` to start one!*"
+    
+    # Update or create the directory message
+    try:
+        if 'message_id' in directory_info and directory_info['message_id']:
+            # Update existing message
+            try:
+                list_msg = await directory_channel.fetch_message(directory_info['message_id'])
+                await list_msg.edit(content=list_content)
+            except:
+                # Message was deleted, create new one
+                list_msg = await directory_channel.send(list_content)
+                directory_channels[guild.id]['message_id'] = list_msg.id
+                save_directories()
+        else:
+            # Create new directory message
+            list_msg = await directory_channel.send(list_content)
+            directory_channels[guild.id]['message_id'] = list_msg.id
+            save_directories()
+    except Exception as e:
+        print(f"Error updating book club directory: {e}")
+
     """Update the live discussion guide, splitting into multiple messages if needed"""
     if not book_club.guide_message_ids:
         return
@@ -338,6 +448,9 @@ async def create_bookclub(interaction: discord.Interaction):
         # Save to file
         save_book_clubs()
         
+        # Update the book club directory
+        await update_book_club_list(guild)
+        
         await channel.send(f"✅ Book club created! Check out {book_channel.mention}")
         
     except asyncio.TimeoutError:
@@ -346,6 +459,24 @@ async def create_bookclub(interaction: discord.Interaction):
         await channel.send("Invalid input. Please use the command again and enter a valid number.")
     except Exception as e:
         await channel.send(f"An error occurred: {str(e)}")
+
+@bot.tree.command(name="set_directory", description="Set this channel as the book club directory")
+async def set_directory(interaction: discord.Interaction):
+    """Set the current channel as the book club directory"""
+    guild = interaction.guild
+    channel = interaction.channel
+    
+    # Set this channel as the directory
+    directory_channels[guild.id] = {
+        'channel_id': channel.id,
+        'message_id': None
+    }
+    save_directories()
+    
+    # Create/update the directory list
+    await update_book_club_list(guild)
+    
+    await interaction.response.send_message(f"✅ This channel is now the book club directory!", ephemeral=True)
 
 @bot.tree.command(name="add_member", description="Add a member to this book club")
 async def add_member(interaction: discord.Interaction, member: discord.Member):
