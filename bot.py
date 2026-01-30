@@ -54,7 +54,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Store book club data
 book_clubs = {}
-directory_channels = {}  # {guild_id: {'channel_id': id, 'message_id': id}}
+directory_channels = {}  # {guild_id: {'channel_id': id, 'message_ids': [id1, id2, id3]}}
 archive_categories = {}  # {guild_id: category_id}
 manual_book_clubs = {}  # {guild_id: [{'name': str, 'channel_id': int}]}
 DATA_FILE = 'bookclubs.json'
@@ -295,55 +295,72 @@ async def update_book_club_list(guild):
     active_clubs = [bc for bc in all_book_clubs if not bc.is_archived]
     archived_clubs = [bc for bc in all_book_clubs if bc.is_archived]
     
-    # Generate list content
-    list_content = ""
-    
-    # Active book clubs section
-    list_content += "# 📚 Active Book Clubs\n\n"
-    if active_clubs:
-        for book_club in sorted(active_clubs, key=lambda x: x.book_name):
+    # Delete old directory messages
+    if 'message_ids' in directory_info:
+        for msg_id in directory_info['message_ids']:
             try:
-                channel = await guild.fetch_channel(book_club.channel_id)
-                list_content += f"📖 **{book_club.book_name}** - <#{channel.id}>\n"
-            except:
-                list_content += f"📖 **{book_club.book_name}** - *(channel not found)*\n"
-    else:
-        list_content += "*No active book clubs. Use `/create_bookclub` to start one!*\n"
-    
-    # Past book clubs section
-    if archived_clubs:
-        list_content += "\n# 📕 Past Book Clubs\n\n"
-        for book_club in sorted(archived_clubs, key=lambda x: x.book_name):
-            try:
-                channel = await guild.fetch_channel(book_club.channel_id)
-                list_content += f"📕 **{book_club.book_name}** - <#{channel.id}>\n"
-            except:
-                list_content += f"📕 **{book_club.book_name}** - *(channel not found)*\n"
-    
-    # Manual book clubs section (not managed by bot)
-    if guild.id in manual_book_clubs and manual_book_clubs[guild.id]:
-        list_content += "\n# 📚 Legacy Book Clubs\n\n*These channels were created manually and are not managed by the bot.*\n\n"
-        for manual_club in sorted(manual_book_clubs[guild.id], key=lambda x: x['name']):
-            try:
-                channel = await guild.fetch_channel(manual_club['channel_id'])
-                list_content += f"📘 **{manual_club['name']}** - <#{channel.id}>\n"
-            except:
-                list_content += f"📘 **{manual_club['name']}** - *(channel not found)*\n"
-    
-    # Update or create the directory message
-    try:
-        # Always delete old message and create new one to ensure mentions parse correctly
-        if 'message_id' in directory_info and directory_info['message_id']:
-            try:
-                old_msg = await directory_channel.fetch_message(directory_info['message_id'])
+                old_msg = await directory_channel.fetch_message(msg_id)
                 await old_msg.delete()
             except:
                 pass
+    elif 'message_id' in directory_info:  # Handle old format
+        try:
+            old_msg = await directory_channel.fetch_message(directory_info['message_id'])
+            await old_msg.delete()
+        except:
+            pass
+    
+    # Create new directory messages
+    message_ids = []
+    
+    try:
+        # Message 1: Active Book Clubs
+        active_content = "# 📚 Active Book Clubs\n\n"
+        if active_clubs:
+            for book_club in sorted(active_clubs, key=lambda x: x.book_name):
+                try:
+                    channel = await guild.fetch_channel(book_club.channel_id)
+                    active_content += f"📖 **{book_club.book_name}** - <#{channel.id}>\n"
+                except:
+                    active_content += f"📖 **{book_club.book_name}** - *(channel not found)*\n"
+        else:
+            active_content += "*No active book clubs. Use `/create_bookclub` to start one!*"
         
-        # Create new directory message
-        list_msg = await directory_channel.send(list_content)
-        directory_channels[guild.id]['message_id'] = list_msg.id
+        msg1 = await directory_channel.send(active_content)
+        message_ids.append(msg1.id)
+        
+        # Message 2: Past Book Clubs (if any)
+        if archived_clubs:
+            past_content = "# 📕 Past Book Clubs\n\n"
+            for book_club in sorted(archived_clubs, key=lambda x: x.book_name):
+                try:
+                    channel = await guild.fetch_channel(book_club.channel_id)
+                    past_content += f"📕 **{book_club.book_name}** - <#{channel.id}>\n"
+                except:
+                    past_content += f"📕 **{book_club.book_name}** - *(channel not found)*\n"
+            
+            msg2 = await directory_channel.send(past_content)
+            message_ids.append(msg2.id)
+        
+        # Message 3: Legacy Book Clubs (if any)
+        if guild.id in manual_book_clubs and manual_book_clubs[guild.id]:
+            legacy_content = "# 📚 Legacy Book Clubs\n\n*These channels were created manually and are not managed by the bot.*\n\n"
+            for manual_club in sorted(manual_book_clubs[guild.id], key=lambda x: x['name']):
+                try:
+                    channel = await guild.fetch_channel(manual_club['channel_id'])
+                    legacy_content += f"📘 **{manual_club['name']}** - <#{channel.id}>\n"
+                except:
+                    legacy_content += f"📘 **{manual_club['name']}** - *(channel not found)*\n"
+            
+            msg3 = await directory_channel.send(legacy_content)
+            message_ids.append(msg3.id)
+        
+        # Save the message IDs
+        directory_channels[guild.id]['message_ids'] = message_ids
+        if 'message_id' in directory_channels[guild.id]:
+            del directory_channels[guild.id]['message_id']  # Remove old format
         save_directories()
+        
     except Exception as e:
         print(f"Error updating book club directory: {e}")
 
@@ -540,7 +557,7 @@ async def set_directory(interaction: discord.Interaction):
     # Set this channel as the directory
     directory_channels[guild.id] = {
         'channel_id': channel.id,
-        'message_id': None
+        'message_ids': []
     }
     save_directories()
     
