@@ -342,18 +342,30 @@ async def update_book_club_list(guild):
             msg2 = await directory_channel.send(past_content)
             message_ids.append(msg2.id)
         
-        # Message 3: Legacy Book Clubs (if any)
+        # Message 3+: Legacy Book Clubs (if any) - split into multiple messages if needed
         if guild.id in manual_book_clubs and manual_book_clubs[guild.id]:
-            legacy_content = "# 📚 Legacy Book Clubs\n\n*These channels were created manually and are not managed by the bot.*\n\n"
-            for manual_club in sorted(manual_book_clubs[guild.id], key=lambda x: x['name']):
-                try:
-                    channel = await guild.fetch_channel(manual_club['channel_id'])
-                    legacy_content += f"📘 **{manual_club['name']}** - <#{channel.id}>\n"
-                except:
-                    legacy_content += f"📘 **{manual_club['name']}** - *(channel not found)*\n"
+            legacy_clubs = sorted(manual_book_clubs[guild.id], key=lambda x: x['name'])
             
-            msg3 = await directory_channel.send(legacy_content)
-            message_ids.append(msg3.id)
+            # Split into chunks of 20 book clubs per message
+            chunk_size = 20
+            for i in range(0, len(legacy_clubs), chunk_size):
+                chunk = legacy_clubs[i:i + chunk_size]
+                
+                # First message includes header
+                if i == 0:
+                    legacy_content = "# 📚 Legacy Book Clubs\n\n*These channels were created manually and are not managed by the bot.*\n\n"
+                else:
+                    legacy_content = ""
+                
+                for manual_club in chunk:
+                    try:
+                        channel = await guild.fetch_channel(manual_club['channel_id'])
+                        legacy_content += f"📘 **{manual_club['name']}** - <#{channel.id}>\n"
+                    except:
+                        legacy_content += f"📘 **{manual_club['name']}** - *(channel not found)*\n"
+                
+                msg_legacy = await directory_channel.send(legacy_content)
+                message_ids.append(msg_legacy.id)
         
         # Save the message IDs
         directory_channels[guild.id]['message_ids'] = message_ids
