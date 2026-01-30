@@ -304,7 +304,7 @@ async def update_book_club_list(guild):
         for book_club in sorted(active_clubs, key=lambda x: x.book_name):
             try:
                 channel = await guild.fetch_channel(book_club.channel_id)
-                list_content += f"📖 **{book_club.book_name}** - {channel.mention}\n"
+                list_content += f"📖 **{book_club.book_name}** - <#{channel.id}>\n"
             except:
                 list_content += f"📖 **{book_club.book_name}** - *(channel not found)*\n"
     else:
@@ -316,7 +316,7 @@ async def update_book_club_list(guild):
         for book_club in sorted(archived_clubs, key=lambda x: x.book_name):
             try:
                 channel = await guild.fetch_channel(book_club.channel_id)
-                list_content += f"📕 **{book_club.book_name}** - {channel.mention}\n"
+                list_content += f"📕 **{book_club.book_name}** - <#{channel.id}>\n"
             except:
                 list_content += f"📕 **{book_club.book_name}** - *(channel not found)*\n"
     
@@ -326,27 +326,24 @@ async def update_book_club_list(guild):
         for manual_club in sorted(manual_book_clubs[guild.id], key=lambda x: x['name']):
             try:
                 channel = await guild.fetch_channel(manual_club['channel_id'])
-                list_content += f"📘 **{manual_club['name']}** - {channel.mention}\n"
+                list_content += f"📘 **{manual_club['name']}** - <#{channel.id}>\n"
             except:
                 list_content += f"📘 **{manual_club['name']}** - *(channel not found)*\n"
     
     # Update or create the directory message
     try:
+        # Always delete old message and create new one to ensure mentions parse correctly
         if 'message_id' in directory_info and directory_info['message_id']:
-            # Update existing message
             try:
-                list_msg = await directory_channel.fetch_message(directory_info['message_id'])
-                await list_msg.edit(content=list_content)
+                old_msg = await directory_channel.fetch_message(directory_info['message_id'])
+                await old_msg.delete()
             except:
-                # Message was deleted, create new one
-                list_msg = await directory_channel.send(list_content)
-                directory_channels[guild.id]['message_id'] = list_msg.id
-                save_directories()
-        else:
-            # Create new directory message
-            list_msg = await directory_channel.send(list_content)
-            directory_channels[guild.id]['message_id'] = list_msg.id
-            save_directories()
+                pass
+        
+        # Create new directory message
+        list_msg = await directory_channel.send(list_content)
+        directory_channels[guild.id]['message_id'] = list_msg.id
+        save_directories()
     except Exception as e:
         print(f"Error updating book club directory: {e}")
 
