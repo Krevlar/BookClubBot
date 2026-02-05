@@ -5,10 +5,21 @@ async def update_discussion_guide(book_club, guild):
     
     try:
         channel = await guild.fetch_channel(book_club.channel_id)
+        
+        # Generate the header (not spoilered)
+        header = f"# Discussion Guide: {book_club.book_name}\n"
+        
+        # Generate the guide content (will be spoilered per chunk)
         guide_content = await generate_guide_content(book_club, guild)
         
-        # Split content into chunks of ~1900 characters (leaving buffer for safety)
+        # Split content into chunks (~1900 chars to leave room for spoiler tags)
         chunks = split_into_chunks(guide_content, 1900)
+        
+        # First message includes the header + first chunk
+        if chunks:
+            chunks[0] = header + chunks[0]
+        else:
+            chunks = [f"{header}||*No comments yet. The guide will update automatically as people comment!*||"]
         
         # Update existing messages or create new ones
         for i, chunk in enumerate(chunks):
@@ -269,10 +280,8 @@ async def generate_guide_content(book_club, guild):
         except Exception as e:
             guide_parts.append(f"\n## {chapter}\n*Error retrieving messages*")
     
-    # Header outside spoiler, content inside spoiler
-    header = f"# Discussion Guide: {book_club.book_name}\n"
-    spoiler_content = "\n".join(guide_parts)
-    return f"{header}||{spoiler_content}||"
+    # Return content WITHOUT spoiler tags - they'll be added when splitting
+    return "\n".join(guide_parts)
 
 async def update_book_club_list(guild):
     """Update the public book club directory for a guild"""
@@ -452,7 +461,10 @@ def split_into_chunks(text, max_length):
     if current_chunk:
         chunks.append(current_chunk.rstrip())
     
-    return chunks
+    # Wrap each chunk in spoiler tags
+    wrapped_chunks = [f"||{chunk}||" for chunk in chunks]
+    
+    return wrapped_chunks
 
 @bot.tree.command(name="create_bookclub", description="Create a new book club channel and threads")
 async def create_bookclub(interaction: discord.Interaction):
