@@ -52,10 +52,11 @@ async def update_discussion_guide(book_club, guild):
     except Exception as e:
         print(f"Error updating discussion guide: {e}")
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import asyncio
 import json
 import os
+from datetime import datetime, timedelta
 
 # Bot setup
 intents = discord.Intents.default()
@@ -85,7 +86,9 @@ def save_book_clubs():
             'members': book_club.members,
             'chapters': book_club.chapters,
             'guide_message_ids': book_club.guide_message_ids,
-            'is_archived': book_club.is_archived
+            'is_archived': book_club.is_archived,
+            'creator_id': book_club.creator_id,
+            'inactive_members': book_club.inactive_members
         }
     with open(DATA_FILE, 'w') as f:
         json.dump(data, f, indent=2)
@@ -120,7 +123,9 @@ def load_book_clubs():
                     bc_data['members'],
                     bc_data['chapters'],
                     bc_data['guide_message_ids'],
-                    bc_data.get('is_archived', False)
+                    bc_data.get('is_archived', False),
+                    bc_data.get('creator_id'),
+                    bc_data.get('inactive_members', [])
                 )
 
 def load_directories():
@@ -173,7 +178,7 @@ def parse_chapters(chapter_string):
     return chapters
 
 class BookClub:
-    def __init__(self, guild_id, book_name, channel_id, thread_ids, members, chapters, guide_message_ids=None, is_archived=False):
+    def __init__(self, guild_id, book_name, channel_id, thread_ids, members, chapters, guide_message_ids=None, is_archived=False, creator_id=None, inactive_members=None):
         self.guild_id = guild_id
         self.book_name = book_name
         self.channel_id = channel_id
@@ -182,6 +187,8 @@ class BookClub:
         self.chapters = chapters
         self.guide_message_ids = guide_message_ids or []
         self.is_archived = is_archived
+        self.creator_id = creator_id  # Track who created the book club
+        self.inactive_members = inactive_members or []  # Members who stopped reading
 
 @bot.event
 async def on_ready():
@@ -204,6 +211,10 @@ async def on_ready():
     print(f'Loaded {len(archive_categories)} archive category(ies)')
     print(f'Loaded {len(bot.active_categories)} active category(ies)')
     print(f'Loaded {len(manual_book_clubs)} guild(s) with manual book clubs')
+    
+    # Start the inactivity check task
+    check_inactive_readers.start()
+    
     try:
         synced = await bot.tree.sync()
         print(f'Synced {len(synced)} command(s)')
@@ -283,6 +294,151 @@ async def generate_guide_content(book_club, guild):
     # Return content WITHOUT spoiler tags - they'll be added when splitting
     return "\n".join(guide_parts)
 
+async def get_reader_progress(book_club, guild):
+    """Get a summary of which members are reading and their latest chapter"""
+    reader_progress = {}
+    
+    # Filter out inactive members
+    active_member_ids = [m for m in book_club.members if m not in book_club.inactive_members]
+    
+    for member_id in active_member_ids:
+        try:
+            member = await guild.fetch_member(member_id)
+            latest_chapter = None
+            latest_chapter_index = -1
+            latest_time = None
+            
+            # Check all threads for this member's most recent comment
+            for i, (chapter, thread_id) in enumerate(book_club.thread_ids.items()):
+                try:
+                    thread = await guild.fetch_channel(thread_id)
+                    async for msg in thread.history(limit=100):
+                        if msg.author.id == member_id and msg.type == discord.MessageType.default:
+                            if latest_time is None or msg.created_at > latest_time:
+                                latest_time = msg.created_at
+                                latest_chapter = chapter
+                                latest_chapter_index = i
+                            break  # Only check most recent message per thread
+                except:
+                    continue
+            
+            if latest_chapter:
+                # Calculate progress percentage
+                total_chapters = len(book_club.chapters)
+                progress_percent = int(((latest_chapter_index + 1) / total_chapters) * 100)
+                reader_progress[member.display_name] = {
+                    'chapter': latest_chapter,
+                    'progress': progress_percent
+                }
+        except:
+            continue
+    
+    return reader_progress
+
+@tasks.loop(hours=24)  # Run once per day
+async def check_inactive_readers():
+    """Check for inactive readers and message them"""
+    print("Running inactivity check...")
+    two_weeks_ago = datetime.utcnow() - timedelta(days=14)
+    
+    for book_club_id, book_club in book_clubs.items():
+        # Skip archived book clubs
+        if book_club.is_archived:
+            continue
+        
+        try:
+            guild = bot.get_guild(book_club.guild_id)
+            if not guild:
+                continue
+            
+            for member_id in book_club.members:
+                # Skip if already marked inactive
+                if member_id in book_club.inactive_members:
+                    continue
+                
+                try:
+                    member = await guild.fetch_member(member_id)
+                    latest_time = None
+                    latest_chapter_index = -1
+                    total_chapters = len(book_club.chapters)
+                    
+                    # Find their most recent comment
+                    for i, thread_id in enumerate(book_club.thread_ids.values()):
+                        try:
+                            thread = await guild.fetch_channel(thread_id)
+                            async for msg in thread.history(limit=100):
+                                if msg.author.id == member_id and msg.type == discord.MessageType.default:
+                                    if latest_time is None or msg.created_at > latest_time:
+                                        latest_time = msg.created_at
+                                        latest_chapter_index = i
+                                    break
+                        except:
+                            continue
+                    
+                    # Check if they should be messaged
+                    if latest_time and latest_time < two_weeks_ago:
+                        # Don't message if they're on the last chapter (they likely finished)
+                        if latest_chapter_index >= total_chapters - 1:
+                            continue
+                        
+                        # Send DM asking if still reading
+                        try:
+                            dm_msg = await member.send(
+                                f"Hi! I noticed you haven't commented on **{book_club.book_name}** in over 2 weeks. "
+                                f"Are you still reading it? Reply with 'yes' or 'no'."
+                            )
+                            
+                            # Wait for response (24 hours)
+                            def check(m):
+                                return m.author.id == member_id and m.channel == dm_msg.channel
+                            
+                            try:
+                                response = await bot.wait_for('message', check=check, timeout=86400)  # 24 hours
+                                if response.content.lower() in ['no', 'n', 'nope', 'not anymore', 'stopped']:
+                                    # Mark as inactive
+                                    book_club.inactive_members.append(member_id)
+                                    save_book_clubs()
+                                    await member.send(f"Got it! I've removed you from the active readers list for **{book_club.book_name}**.")
+                            except asyncio.TimeoutError:
+                                # No response - assume still reading
+                                pass
+                        except discord.Forbidden:
+                            # Can't DM this user
+                            pass
+                
+                except:
+                    continue
+            
+            # Check if everyone has finished or stopped
+            active_readers = [m for m in book_club.members if m not in book_club.inactive_members]
+            if not active_readers and book_club.creator_id:
+                try:
+                    creator = await guild.fetch_member(book_club.creator_id)
+                    channel = await guild.fetch_channel(book_club.channel_id)
+                    await creator.send(
+                        f"Hey! It looks like everyone has either finished or stopped reading **{book_club.book_name}**. "
+                        f"You might want to archive it using `/archive_bookclub` in {channel.mention}."
+                    )
+                except:
+                    pass
+        
+        except Exception as e:
+            print(f"Error checking book club {book_club_id}: {e}")
+    
+    # Update all directories after inactivity check
+    for guild_id in directory_channels.keys():
+        try:
+            guild = bot.get_guild(guild_id)
+            if guild:
+                await update_book_club_list(guild)
+        except:
+            pass
+
+@check_inactive_readers.before_loop
+async def before_inactivity_check():
+    """Wait until bot is ready before starting the task"""
+    await bot.wait_until_ready()
+
 async def update_book_club_list(guild):
     """Update the public book club directory for a guild"""
     # Check if a directory channel exists for this guild
@@ -330,8 +486,18 @@ async def update_book_club_list(guild):
                 try:
                     channel = await guild.fetch_channel(book_club.channel_id)
                     active_content += f"📖 **{book_club.book_name}** - <#{channel.id}>\n"
+                    
+                    # Get reader progress
+                    progress = await get_reader_progress(book_club, guild)
+                    if progress:
+                        readers_list = []
+                        for reader, info in sorted(progress.items()):
+                            readers_list.append(f"{reader} ({info['chapter']}, {info['progress']}%)")
+                        active_content += f"   *Readers: {', '.join(readers_list)}*\n"
+                    
+                    active_content += "\n"
                 except:
-                    active_content += f"📖 **{book_club.book_name}** - *(channel not found)*\n"
+                    active_content += f"📖 **{book_club.book_name}** - *(channel not found)*\n\n"
         else:
             active_content += "*No active book clubs. Use `/create_bookclub` to start one!*"
         
@@ -469,7 +635,7 @@ def split_into_chunks(text, max_length):
 @bot.tree.command(name="create_bookclub", description="Create a new book club channel and threads")
 async def create_bookclub(interaction: discord.Interaction):
     """Interactive command to create a book club"""
-    await interaction.response.send_message("Let's set up your book club! I'll ask you some questions.", ephemeral=True)
+    await interaction.response.send_message("Let's set up your book club! I'll ask you some questions in this channel.", ephemeral=True)
     
     user = interaction.user
     channel = interaction.channel
@@ -554,7 +720,9 @@ async def create_bookclub(interaction: discord.Interaction):
             thread_ids,
             [m.id for m in members],
             chapters,
-            [guide_msg.id]
+            [guide_msg.id],
+            False,  # is_archived
+            user.id  # creator_id
         )
         
         # Save to file
@@ -654,20 +822,22 @@ async def archive_bookclub(interaction: discord.Interaction):
     except Exception as e:
         await interaction.response.send_message(f"Error archiving book club: {str(e)}", ephemeral=True)
 
-@bot.tree.command(name="unarchive_bookclub", description="Unarchive this book club (moves back to active)")
-async def unarchive_bookclub(interaction: discord.Interaction):
-    """Unarchive the current book club and move it back to active"""
-    # Check if current channel is a book club
-    book_club_id = f"{interaction.guild.id}_{interaction.channel.id}"
+@bot.tree.command(name="unarchive_bookclub", description="Unarchive a book club (moves back to active)")
+async def unarchive_bookclub(interaction: discord.Interaction, channel: discord.TextChannel):
+    """Unarchive a book club and move it back to active"""
+    await interaction.response.defer(ephemeral=True)
+    
+    # Check if specified channel is a book club
+    book_club_id = f"{interaction.guild.id}_{channel.id}"
     if book_club_id not in book_clubs:
-        await interaction.response.send_message("This command must be used in a book club channel.", ephemeral=True)
+        await interaction.followup.send("That channel is not a book club.", ephemeral=True)
         return
     
     book_club = book_clubs[book_club_id]
     
     # Check if it's actually archived
     if not book_club.is_archived:
-        await interaction.response.send_message("This book club is already active!", ephemeral=True)
+        await interaction.followup.send("This book club is already active!", ephemeral=True)
         return
     
     try:
@@ -684,7 +854,7 @@ async def unarchive_bookclub(interaction: discord.Interaction):
         if interaction.guild.id in bot.active_categories:
             # Move to active category
             active_category = await interaction.guild.fetch_channel(bot.active_categories[interaction.guild.id])
-            await interaction.channel.edit(category=active_category)
+            await channel.edit(category=active_category)
             message = f"✅ Book club unarchived and moved to **{active_category.name}**!"
         else:
             # No active category set, just unarchive without moving
@@ -697,21 +867,23 @@ async def unarchive_bookclub(interaction: discord.Interaction):
         # Update the directory
         await update_book_club_list(interaction.guild)
         
-        await interaction.response.send_message(message, ephemeral=True)
+        await interaction.followup.send(message, ephemeral=True)
     
     except Exception as e:
-        await interaction.response.send_message(f"Error unarchiving book club: {str(e)}", ephemeral=True)
+        await interaction.followup.send(f"Error unarchiving book club: {str(e)}", ephemeral=True)
 
 @bot.tree.command(name="import_legacy_books", description="Import all channels from a category as legacy book clubs")
 async def import_legacy_books(interaction: discord.Interaction, category: discord.CategoryChannel):
     """Import all text channels from a category as legacy (manually created) book clubs"""
+    await interaction.response.defer(ephemeral=True)
+    
     guild = interaction.guild
     
     # Get all text channels in the category
     channels_in_category = [ch for ch in category.channels if isinstance(ch, discord.TextChannel)]
     
     if not channels_in_category:
-        await interaction.response.send_message(f"No text channels found in **{category.name}**.", ephemeral=True)
+        await interaction.followup.send(f"No text channels found in **{category.name}**.", ephemeral=True)
         return
     
     # Initialize manual book clubs list for this guild if it doesn't exist
@@ -736,30 +908,32 @@ async def import_legacy_books(interaction: discord.Interaction, category: discor
     # Update the directory
     await update_book_club_list(guild)
     
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"✅ Imported {imported_count} legacy book club(s) from **{category.name}**!\n"
         f"They will appear in the directory under 'Legacy Book Clubs'.",
         ephemeral=True
     )
 
-@bot.tree.command(name="add_member", description="Add a member to this book club")
-async def add_member(interaction: discord.Interaction, member: discord.Member):
-    """Add a new member to the book club in the current channel"""
-    # Check if current channel is a book club
-    book_club_id = f"{interaction.guild.id}_{interaction.channel.id}"
+@bot.tree.command(name="add_member", description="Add a member to a book club")
+async def add_member(interaction: discord.Interaction, channel: discord.TextChannel, member: discord.Member):
+    """Add a member to a book club"""
+    await interaction.response.defer(ephemeral=True)
+    
+    # Check if specified channel is a book club
+    book_club_id = f"{interaction.guild.id}_{channel.id}"
     if book_club_id not in book_clubs:
-        await interaction.response.send_message("This command must be used in a book club channel.", ephemeral=True)
+        await interaction.followup.send("That channel is not a book club.", ephemeral=True)
         return
     
     book_club = book_clubs[book_club_id]
     
     # Check if member is already in the book club
     if member.id in book_club.members:
-        await interaction.response.send_message(f"{member.mention} is already in this book club.", ephemeral=True)
+        await interaction.followup.send(f"{member.mention} is already in this book club.", ephemeral=True)
         return
     
     # Add permissions to channel
-    await interaction.channel.set_permissions(member, read_messages=True, send_messages=True)
+    await channel.set_permissions(member, read_messages=True, send_messages=True)
     
     # Add to all threads
     for thread_id in book_club.thread_ids.values():
@@ -774,7 +948,7 @@ async def add_member(interaction: discord.Interaction, member: discord.Member):
     # Save to file
     save_book_clubs()
     
-    await interaction.response.send_message(f"✅ Added {member.mention} to the book club!", ephemeral=True)
+    await interaction.followup.send(f"✅ Added {member.mention} to {channel.mention}!", ephemeral=True)
 
 # Run the bot
 # Replace 'YOUR_BOT_TOKEN' with your actual Discord bot token
