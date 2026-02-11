@@ -914,6 +914,103 @@ async def import_legacy_books(interaction: discord.Interaction, category: discor
         ephemeral=True
     )
 
+@bot.tree.command(name="join_bookclub", description="Join an active book club")
+async def join_bookclub(interaction: discord.Interaction):
+    """Join an active book club by selecting from a list"""
+    # Get all active book clubs for this guild
+    guild_book_clubs = [bc for bc in book_clubs.values() if bc.guild_id == interaction.guild.id and not bc.is_archived]
+    
+    if not guild_book_clubs:
+        await interaction.response.send_message("No active book clubs available to join.", ephemeral=True)
+        return
+    
+    # Sort by book name
+    guild_book_clubs.sort(key=lambda x: x.book_name)
+    
+    # Create a dropdown with book club options (max 25 for Discord select menus)
+    if len(guild_book_clubs) > 25:
+        await interaction.response.send_message(
+            "There are too many book clubs to display in a menu. Please use `/add_member` with a specific channel.",
+            ephemeral=True
+        )
+        return
+    
+    # Create select menu options
+    from discord import SelectOption
+    from discord.ui import Select, View
+    
+    options = []
+    book_club_map = {}
+    for i, bc in enumerate(guild_book_clubs):
+        # Check if user is already a member
+        is_member = interaction.user.id in bc.members
+        label = bc.book_name
+        if is_member:
+            label += " ✓"
+        
+        options.append(SelectOption(
+            label=label[:100],  # Discord max label length
+            description=f"{len(bc.chapters)} chapters" + (" - Already joined" if is_member else ""),
+            value=str(i)
+        ))
+        book_club_map[str(i)] = bc
+    
+    # Create the select menu
+    select = Select(
+        placeholder="Choose a book club to join...",
+        options=options
+    )
+    
+    async def select_callback(select_interaction):
+        selected_index = select.values[0]
+        selected_bc = book_club_map[selected_index]
+        
+        # Check if already a member
+        if select_interaction.user.id in selected_bc.members:
+            await select_interaction.response.send_message(
+                f"You're already a member of **{selected_bc.book_name}**!",
+                ephemeral=True
+            )
+            return
+        
+        # Add the user to the book club
+        try:
+            channel = await interaction.guild.fetch_channel(selected_bc.channel_id)
+            
+            # Add permissions to channel
+            await channel.set_permissions(select_interaction.user, read_messages=True, send_messages=True)
+            
+            # Add to all threads
+            for thread_id in selected_bc.thread_ids.values():
+                try:
+                    thread = await interaction.guild.fetch_channel(thread_id)
+                    await thread.add_user(select_interaction.user)
+                except:
+                    pass
+            
+            selected_bc.members.append(select_interaction.user.id)
+            save_book_clubs()
+            
+            await select_interaction.response.send_message(
+                f"✅ You've joined **{selected_bc.book_name}**! Check out {channel.mention}",
+                ephemeral=True
+            )
+        except Exception as e:
+            await select_interaction.response.send_message(
+                f"Error joining book club: {str(e)}",
+                ephemeral=True
+            )
+    
+    select.callback = select_callback
+    view = View()
+    view.add_item(select)
+    
+    await interaction.response.send_message(
+        "Select a book club to join:",
+        view=view,
+        ephemeral=True
+    )
+
 @bot.tree.command(name="add_member", description="Add a member to a book club")
 async def add_member(interaction: discord.Interaction, channel: discord.TextChannel, member: discord.Member):
     """Add a member to a book club"""
