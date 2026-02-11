@@ -2,7 +2,7 @@
 
 ## Overview
 
-This Discord bot creates private book club channels with discussion threads for each chapter. It automatically maintains a live discussion guide that updates in real-time as members comment, and provides a public directory to browse all active and past book clubs.
+This Discord bot creates private book club channels with discussion threads for each chapter. It automatically maintains a live discussion guide that updates in real-time as members comment, provides a public directory to browse all active and past book clubs, and tracks reader progress with automatic inactivity checks.
 
 ---
 
@@ -166,23 +166,29 @@ Creates a new book club with private channel, chapter threads, and live discussi
 - Thread for each chapter (all members auto-added)
 - Live discussion guide that updates automatically
 - Entry in the book club directory
+- Tracks you as the creator for notifications
 
 ---
 
 ### `/add_member`
 
-Adds a new member to the current book club.
+Adds a new member to a book club.
 
-**Usage:** Must be used inside a book club channel
+**Usage:** Can be used from any channel
 
 ```
-/add_member member:@NewPerson
+/add_member channel:#book-club-name member:@Person
 ```
 
 **What Happens:**
 - Member gains access to the channel
 - Member is added to all chapter threads
 - Discussion guide remains accessible to them
+
+**Use Cases:**
+- Add yourself to a book club you want to join
+- Add others from the directory channel
+- Self-service joining
 
 ---
 
@@ -199,20 +205,26 @@ Sets the current channel as the public book club directory.
 **What It Does:**
 - Designates this channel as the directory
 - Creates a list of all active and past book clubs
-- Updates automatically when book clubs are created or archived
+- Shows reader progress for active books
+- Updates automatically when book clubs are created, archived, or members comment
 - Only one directory per server
 
 **Directory Format:**
 ```
 # 📚 Active Book Clubs
 
-📖 **Book Name 1** - #book-channel-1
-📖 **Book Name 2** - #book-channel-2
+📖 **Book Name** - #book-channel
+   *Readers: Alice (Chapter 5, 22%), Bob (Chapter 3, 13%)*
 
 # 📕 Past Book Clubs
 
-📕 **Archived Book 1** - #archived-book-1
-📕 **Archived Book 2** - #archived-book-2
+📕 **Archived Book** - #archived-book
+
+# 📚 Legacy Book Clubs
+
+*These channels were created manually and are not managed by the bot.*
+
+📘 **Manual Book** - #manual-book
 ```
 
 ---
@@ -234,6 +246,23 @@ Sets which category archived book clubs should be moved to.
 
 ---
 
+### `/set_active_category`
+
+Sets which category active book clubs should be in.
+
+**Usage:** Run once to configure (optional)
+
+```
+/set_active_category category:[Select your category]
+```
+
+**What It Does:**
+- Tells the bot where to move unarchived book clubs
+- Optional - if not set, unarchiving just marks as active without moving
+- Useful for organization
+
+---
+
 ### `/archive_bookclub`
 
 Archives the current book club and moves it to the archive category.
@@ -249,8 +278,47 @@ Archives the current book club and moves it to the archive category.
 - Book club is marked as archived
 - Moves from "Active" to "Past" section in the directory
 - All discussion history is preserved
+- Stops inactivity checking for this book
 
 **Note:** You must set an archive category with `/set_archive_category` before using this command.
+
+---
+
+### `/unarchive_bookclub`
+
+Unarchives a book club and moves it back to active.
+
+**Usage:** Can be used from any channel
+
+```
+/unarchive_bookclub channel:#archived-book-name
+```
+
+**What Happens:**
+- Channel is moved to the active category (if set)
+- Book club is marked as active
+- Moves from "Past" to "Active" section in the directory
+- Resumes inactivity checking
+- Great for when someone wants to re-read an old book
+
+---
+
+### `/import_legacy_books`
+
+One-time import of manually created book club channels.
+
+**Usage:** Run once to import existing channels
+
+```
+/import_legacy_books category:[Your legacy books category]
+```
+
+**What It Does:**
+- Scans all text channels in the specified category
+- Adds them to the directory under "Legacy Book Clubs"
+- Converts channel names to readable titles
+- These channels won't have bot-managed features (no discussion guides)
+- Safe to run multiple times (won't duplicate)
 
 ---
 
@@ -263,9 +331,10 @@ The discussion guide is automatically created and maintained by the bot.
 - Updates when messages are edited
 - Shows reply context (when someone replies to another comment)
 - Organizes comments by chapter in chronological order
-- Strips spoiler tags (`||text||`) so the guide is readable
-- Automatically splits into multiple messages if content exceeds Discord's character limit
-- Header "Discussion Guide: Book Name" is visible, content is wrapped in spoiler tags
+- Strips spoiler tags (`||text||`) from individual comments
+- Automatically splits into multiple messages if content exceeds Discord's limits
+- Each message is independently wrapped in spoiler tags
+- Header "Discussion Guide: Book Name" is visible, content is hidden
 
 **Format:**
 ```
@@ -282,6 +351,35 @@ The discussion guide is automatically created and maintained by the bot.
 ```
 
 **Location:** Posted at the bottom of the book club channel
+
+---
+
+## Reader Progress Tracking
+
+The bot automatically tracks and displays reader progress in the directory.
+
+**What It Shows:**
+- Which members are actively reading each book
+- The last chapter they commented on
+- Progress percentage through the book
+- Updates when members comment
+
+**Inactivity Detection:**
+- Runs once every 24 hours automatically
+- Checks for members who haven't commented in 2+ weeks
+- Skips members on the last chapter (assumes they finished)
+- Sends a DM: "Are you still reading? Reply yes or no"
+- Waits 24 hours for a response
+
+**Actions Based on Response:**
+- **"No"** → Removes from active readers list (won't show in directory)
+- **"Yes" or no response** → Keeps as active reader
+- **Can't DM** → Silently skips
+
+**Creator Notification:**
+- If all members have finished or stopped reading, the bot DMs the creator
+- Suggests archiving the book club
+- Only sends once per book club
 
 ---
 
@@ -302,6 +400,16 @@ After installing the bot, run these commands once to set up your server:
    /set_archive_category category:[Your "Old books" category]
    ```
 
+4. **Set active category** (optional, for organization):
+   ```
+   /set_active_category category:[Your "Active books" category]
+   ```
+
+5. **Import legacy books** (optional, if you have manually created book channels):
+   ```
+   /import_legacy_books category:[Your legacy category]
+   ```
+
 Now you're ready to create book clubs!
 
 ---
@@ -312,17 +420,20 @@ Now you're ready to create book clubs!
 - Use spoiler tags `||like this||` when commenting to avoid notification spoilers
 - The discussion guide shows all comments without spoilers for easy reading
 - Use Discord's reply feature - it shows in the guide as indented replies
+- Respond to the bot's inactivity check to stay on the active readers list
 
 **For Book Club Management:**
 - Book clubs are created in the same category as the channel where you run `/create_bookclub`
 - You can manually move channels between categories without breaking any features
 - Use `/archive_bookclub` when a book club is finished
-- The directory automatically updates to reflect active vs. past book clubs
+- Use `/unarchive_bookclub` to revive old books when someone wants to re-read
+- The directory automatically updates to reflect changes
+- Check the directory to see who's reading what and their progress
 
 **For Bot Management:**
-- Bot must be running 24/7 for live updates to work
-- If bot goes offline, guides will update when it comes back online
-- All data is saved to files (`bookclubs.json`, `directories.json`, `archives.json`)
+- Bot must be running 24/7 for live updates and inactivity checks to work
+- If bot goes offline, guides and checks will resume when it comes back online
+- All data is saved to JSON files (see Data Persistence section)
 - Book clubs created with older versions will work with new features after update
 
 ---
@@ -421,15 +532,31 @@ chmod +x ~/update_bot.sh
 - Run `/set_directory` in the channel you want to use as the directory
 - Restart the bot to ensure it loads all existing book clubs
 
+**Directory links not clickable:**
+- The bot recreates directory messages to ensure links parse correctly
+- If issues persist, try deleting the directory message and running `/set_directory` again
+
+**Inactivity checks not working:**
+- Ensure bot has been running for at least 24 hours
+- Check that the bot can send DMs (some users block DMs from bots)
+- Review logs for any errors during the daily check
+
+**Reader progress not showing:**
+- Members must comment in threads to appear in progress tracking
+- Inactive members (who responded "no" to the inactivity check) won't appear
+- Progress updates when the directory refreshes
+
 ---
 
 ## Data Persistence
 
-The bot stores data in three JSON files in the bot directory:
+The bot stores data in JSON files in the bot directory:
 
-- `bookclubs.json` - All book club information
+- `bookclubs.json` - All book club information including members and inactive status
 - `directories.json` - Directory channel configuration
 - `archives.json` - Archive category settings
+- `active_categories.json` - Active category settings
+- `manual_bookclubs.json` - Legacy book club listings
 
 These files persist across bot restarts, so your book clubs are never lost.
 
@@ -443,4 +570,23 @@ These files persist across bot restarts, so your book clubs are never lost.
 - Only bot administrators should have access to the Ubuntu server
 - The bot only has access to channels it creates or is explicitly invited to
 - Book club channels are private - only mentioned members can access them
-- Consider using `.gitignore` to exclude `bookclubs.json` and token if using version control
+- Consider using `.gitignore` to exclude JSON data files and token if using version control
+- The bot can DM users for inactivity checks - users can block this if desired
+
+---
+
+## Features Summary
+
+✅ **Automated book club creation** with chapter threads  
+✅ **Live-updating discussion guides** with spoiler protection and reply context  
+✅ **Public directory** with active, past, and legacy books  
+✅ **Reader progress tracking** with chapter location and completion percentage  
+✅ **Archive/unarchive functionality** for managing finished books  
+✅ **Legacy book import** for manually created channels  
+✅ **Automatic inactivity detection** with member DMs  
+✅ **Creator notifications** when books are finished  
+✅ **Proper formatting** with split messages for large content  
+✅ **Self-service joining** - members can add themselves to books  
+✅ **Persistent data storage** across restarts
+
+Happy reading! 📚
