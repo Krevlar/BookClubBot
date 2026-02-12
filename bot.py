@@ -234,6 +234,8 @@ async def on_message(message):
             if message.channel.id in book_club.thread_ids.values():
                 # Update the discussion guide
                 await update_discussion_guide(book_club, message.guild)
+                # Update the directory (for reader progress)
+                await update_book_club_list(message.guild)
                 break
     
     await bot.process_commands(message)
@@ -251,6 +253,8 @@ async def on_message_edit(before, after):
             if after.channel.id in book_club.thread_ids.values():
                 # Update the discussion guide
                 await update_discussion_guide(book_club, after.guild)
+                # Update the directory (for reader progress)
+                await update_book_club_list(after.guild)
                 break
 
 async def generate_guide_content(book_club, guild):
@@ -460,27 +464,33 @@ async def update_book_club_list(guild):
     active_clubs = [bc for bc in all_book_clubs if not bc.is_archived]
     archived_clubs = [bc for bc in all_book_clubs if bc.is_archived]
     
-    # Delete old directory messages
-    if 'message_ids' in directory_info:
+    # Check if we need to recreate messages (new book club added, structure changed, etc.)
+    needs_recreate = False
+    if 'message_ids' not in directory_info or not directory_info['message_ids']:
+        needs_recreate = True
+    
+    # If recreating, delete old messages
+    if needs_recreate and 'message_ids' in directory_info:
         for msg_id in directory_info['message_ids']:
             try:
                 old_msg = await directory_channel.fetch_message(msg_id)
                 await old_msg.delete()
             except:
                 pass
-    elif 'message_id' in directory_info:  # Handle old format
+    elif needs_recreate and 'message_id' in directory_info:  # Handle old format
         try:
             old_msg = await directory_channel.fetch_message(directory_info['message_id'])
             await old_msg.delete()
         except:
             pass
     
-    # Create new directory messages
-    message_ids = []
+    # Generate content
+    message_ids = directory_info.get('message_ids', []) if not needs_recreate else []
     
     try:
         # Message 1: Active Book Clubs
-        active_content = "# 📚 Active Book Clubs\n\n"
+        active_content = "# 📚 Active Book Clubs\n"
+        active_content += "*Use `/join_bookclub` to join an active book, or `/unarchive_bookclub` to revive a past one.*\n\n"
         if active_clubs:
             for book_club in sorted(active_clubs, key=lambda x: x.book_name):
                 try:
@@ -501,8 +511,21 @@ async def update_book_club_list(guild):
         else:
             active_content += "*No active book clubs. Use `/create_bookclub` to start one!*"
         
-        msg1 = await directory_channel.send(active_content)
-        message_ids.append(msg1.id)
+        if needs_recreate or len(message_ids) == 0:
+            msg1 = await directory_channel.send(active_content)
+            if len(message_ids) == 0:
+                message_ids.append(msg1.id)
+            else:
+                message_ids[0] = msg1.id
+        else:
+            # Edit existing message
+            try:
+                msg1 = await directory_channel.fetch_message(message_ids[0])
+                await msg1.edit(content=active_content)
+            except:
+                # Message was deleted, recreate
+                msg1 = await directory_channel.send(active_content)
+                message_ids[0] = msg1.id
         
         # Message 2: Past Book Clubs (if any)
         if archived_clubs:
@@ -514,15 +537,32 @@ async def update_book_club_list(guild):
                 except:
                     past_content += f"📕 **{book_club.book_name}** - *(channel not found)*\n"
             
-            msg2 = await directory_channel.send(past_content)
-            message_ids.append(msg2.id)
+            if needs_recreate or len(message_ids) <= 1:
+                msg2 = await directory_channel.send(past_content)
+                if len(message_ids) <= 1:
+                    message_ids.append(msg2.id)
+                else:
+                    message_ids[1] = msg2.id
+            else:
+                # Edit existing message
+                try:
+                    msg2 = await directory_channel.fetch_message(message_ids[1])
+                    await msg2.edit(content=past_content)
+                except:
+                    # Message was deleted, recreate
+                    msg2 = await directory_channel.send(past_content)
+                    message_ids[1] = msg2.id
         
         # Message 3+: Legacy Book Clubs (if any) - split into multiple messages if needed
+        legacy_start_index = 2 if archived_clubs else 1
+        
         if guild.id in manual_book_clubs and manual_book_clubs[guild.id]:
             legacy_clubs = sorted(manual_book_clubs[guild.id], key=lambda x: x['name'])
             
             # Split into chunks of 20 book clubs per message
             chunk_size = 20
+            legacy_msg_index = legacy_start_index
+            
             for i in range(0, len(legacy_clubs), chunk_size):
                 chunk = legacy_clubs[i:i + chunk_size]
                 
@@ -539,8 +579,23 @@ async def update_book_club_list(guild):
                     except:
                         legacy_content += f"📘 **{manual_club['name']}** - *(channel not found)*\n"
                 
-                msg_legacy = await directory_channel.send(legacy_content)
-                message_ids.append(msg_legacy.id)
+                if needs_recreate or len(message_ids) <= legacy_msg_index:
+                    msg_legacy = await directory_channel.send(legacy_content)
+                    if len(message_ids) <= legacy_msg_index:
+                        message_ids.append(msg_legacy.id)
+                    else:
+                        message_ids[legacy_msg_index] = msg_legacy.id
+                else:
+                    # Edit existing message
+                    try:
+                        msg_legacy = await directory_channel.fetch_message(message_ids[legacy_msg_index])
+                        await msg_legacy.edit(content=legacy_content)
+                    except:
+                        # Message was deleted, recreate
+                        msg_legacy = await directory_channel.send(legacy_content)
+                        message_ids[legacy_msg_index] = msg_legacy.id
+                
+                legacy_msg_index += 1
         
         # Save the message IDs
         directory_channels[guild.id]['message_ids'] = message_ids
@@ -693,6 +748,8 @@ async def create_bookclub(interaction: discord.Interaction):
         
         # Create threads for each chapter
         thread_ids = {}
+        thread_objects = {}  # Store thread objects for navigation links
+        
         for chapter in chapters:
             # Create a message for the thread
             msg = await book_channel.send(f"**{chapter}**")
@@ -705,8 +762,32 @@ async def create_bookclub(interaction: discord.Interaction):
                 except:
                     pass
             
-            await thread.send(f"Discussion thread for **{chapter}**. Share your thoughts here!")
             thread_ids[chapter] = thread.id
+            thread_objects[chapter] = thread
+        
+        # Now add navigation messages to each thread
+        chapter_list = list(chapters)
+        for i, chapter in enumerate(chapter_list):
+            thread = thread_objects[chapter]
+            
+            # Build navigation message
+            nav_parts = []
+            
+            # Previous chapter link
+            if i > 0:
+                prev_chapter = chapter_list[i - 1]
+                prev_thread_id = thread_ids[prev_chapter]
+                nav_parts.append(f"← Previous: <#{prev_thread_id}>")
+            
+            # Next chapter link
+            if i < len(chapter_list) - 1:
+                next_chapter = chapter_list[i + 1]
+                next_thread_id = thread_ids[next_chapter]
+                nav_parts.append(f"Next: <#{next_thread_id}> →")
+            
+            if nav_parts:
+                nav_message = " | ".join(nav_parts)
+                await thread.send(nav_message)
         
         # Create initial discussion guide message
         guide_msg = await book_channel.send(f"# Discussion Guide: {book_name}\n||*No comments yet. The guide will update automatically as people comment!*||")
