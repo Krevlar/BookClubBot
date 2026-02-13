@@ -68,7 +68,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 book_clubs = {}
 directory_channels = {}  # {guild_id: {'channel_id': id, 'message_ids': [id1, id2, id3]}}
 archive_categories = {}  # {guild_id: category_id}
-manual_book_clubs = {}  # {guild_id: [{'name': str, 'channel_id': int}]}
+manual_book_clubs = {}  # {guild_id: [{'name': str, 'channel_id': int, 'archived': bool}]}
 DATA_FILE = 'bookclubs.json'
 DIRECTORY_FILE = 'directories.json'
 ARCHIVE_FILE = 'archives.json'
@@ -154,6 +154,18 @@ def load_manual_book_clubs():
             manual_book_clubs = json.load(f)
             # Convert string keys to integers
             manual_book_clubs = {int(k): v for k, v in manual_book_clubs.items()}
+            
+            # Migration: add 'archived' field to any entries missing it
+            migrated = False
+            for guild_id, clubs in manual_book_clubs.items():
+                for club in clubs:
+                    if 'archived' not in club:
+                        club['archived'] = False
+                        migrated = True
+            
+            if migrated:
+                save_manual_book_clubs()
+                print("Migrated legacy book clubs to include archived field")
 
 def parse_chapters(chapter_string):
     """Parse chapter string like 'Prologue, 1-5, Epilogue' into a list of chapter names"""
@@ -508,7 +520,17 @@ async def update_book_club_list(guild):
                     active_content += "\n"
                 except:
                     active_content += f"📖 **{book_club.book_name}** - *(channel not found)*\n\n"
-        else:
+        
+        # Active legacy books
+        active_legacy = [bc for bc in manual_book_clubs.get(guild.id, []) if not bc.get('archived', True)]
+        for manual_club in sorted(active_legacy, key=lambda x: x['name']):
+            try:
+                channel = await guild.fetch_channel(manual_club['channel_id'])
+                active_content += f"📘 **{manual_club['name']}** - <#{channel.id}>\n\n"
+            except:
+                active_content += f"📘 **{manual_club['name']}** - *(channel not found)*\n\n"
+        
+        if not active_clubs and not active_legacy:
             active_content += "*No active book clubs. Use `/create_bookclub` to start one!*"
         
         if needs_recreate or len(message_ids) == 0:
