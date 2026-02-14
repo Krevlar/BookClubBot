@@ -843,6 +843,19 @@ async def create_bookclub(interaction: discord.Interaction):
     except Exception as e:
         await channel.send(f"An error occurred: {str(e)}")
 
+@bot.tree.command(name="sync_commands", description="Force re-sync all bot commands with Discord")
+async def sync_commands(interaction: discord.Interaction):
+    """Force re-sync all commands with Discord"""
+    await interaction.response.defer(ephemeral=True)
+    try:
+        # Clear all commands and re-sync
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync()
+        synced = await bot.tree.sync()
+        await interaction.followup.send(f"✅ Re-synced {len(synced)} command(s) with Discord. Changes may take a few minutes to appear.", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"Error syncing commands: {str(e)}", ephemeral=True)
+
 @bot.tree.command(name="set_directory", description="Set this channel as the book club directory")
 async def set_directory(interaction: discord.Interaction):
     """Set the current channel as the book club directory"""
