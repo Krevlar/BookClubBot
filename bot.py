@@ -228,6 +228,7 @@ async def on_ready():
     check_inactive_readers.start()
     
     try:
+        bot.tree.clear_commands(guild=None)
         synced = await bot.tree.sync()
         print(f'Synced {len(synced)} command(s)')
     except Exception as e:
