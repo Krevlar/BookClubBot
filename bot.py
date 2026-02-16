@@ -228,7 +228,6 @@ async def on_ready():
     check_inactive_readers.start()
     
     try:
-        bot.tree.clear_commands(guild=None)
         synced = await bot.tree.sync()
         print(f'Synced {len(synced)} command(s)')
     except Exception as e:
@@ -849,9 +848,6 @@ async def sync_commands(interaction: discord.Interaction):
     """Force re-sync all commands with Discord"""
     await interaction.response.defer(ephemeral=True)
     try:
-        # Clear all commands and re-sync
-        bot.tree.clear_commands(guild=None)
-        await bot.tree.sync()
         synced = await bot.tree.sync()
         await interaction.followup.send(f"✅ Re-synced {len(synced)} command(s) with Discord. Changes may take a few minutes to appear.", ephemeral=True)
     except Exception as e:
