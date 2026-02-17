@@ -1070,39 +1070,48 @@ async def unarchive_bookclub(interaction: discord.Interaction):
     guild = interaction.guild
     guild_id = guild.id
 
-    # Build a set of channel IDs already tracked so we can spot untracked ones
-    tracked_channel_ids = set()
+    # Use the archive category as the source of truth — anything physically
+    # in that category is considered archived, regardless of JSON flags.
+    if guild_id not in archive_categories:
+        await interaction.response.send_message(
+            "No archive category set. Use `/set_archive_category` first so the bot knows where to look.",
+            ephemeral=True
+        )
+        return
 
-    # Bot-managed archived clubs
-    archived_managed = []
-    for bc in book_clubs.values():
-        if bc.guild_id == guild_id and bc.is_archived:
-            archived_managed.append(bc)
-            tracked_channel_ids.add(bc.channel_id)
+    archive_cat = guild.get_channel(archive_categories[guild_id])
+    if not archive_cat:
+        await interaction.response.send_message(
+            "The configured archive category could not be found. Please run `/set_archive_category` again.",
+            ephemeral=True
+        )
+        return
 
-    # Tracked legacy clubs marked archived
-    archived_legacy = []
-    for bc in manual_book_clubs.get(guild_id, []):
-        tracked_channel_ids.add(bc['channel_id'])
-        if bc.get('archived', False):
-            archived_legacy.append(bc)
-
-    # Untracked channels sitting in the archive category
-    archived_untracked = []
-    if guild_id in archive_categories:
-        archive_cat = guild.get_channel(archive_categories[guild_id])
-        if archive_cat:
-            for ch in archive_cat.text_channels:
-                if ch.id not in tracked_channel_ids:
-                    archived_untracked.append(ch)
+    # Build lookup maps for quick classification
+    managed_by_channel = {
+        bc.channel_id: bc
+        for bc in book_clubs.values()
+        if bc.guild_id == guild_id
+    }
+    legacy_by_channel = {
+        club['channel_id']: club
+        for club in manual_book_clubs.get(guild_id, [])
+    }
 
     all_archived = []
-    for bc in sorted(archived_managed, key=lambda x: x.book_name):
-        all_archived.append({'type': 'managed', 'data': bc, 'name': bc.book_name})
-    for bc in sorted(archived_legacy, key=lambda x: x['name']):
-        all_archived.append({'type': 'legacy', 'data': bc, 'name': bc['name']})
-    for ch in sorted(archived_untracked, key=lambda x: x.name):
-        all_archived.append({'type': 'untracked', 'data': ch, 'name': ch.name.replace('-', ' ').title()})
+    for ch in sorted(archive_cat.text_channels, key=lambda x: x.name):
+        if ch.id in managed_by_channel:
+            bc = managed_by_channel[ch.id]
+            all_archived.append({'type': 'managed', 'data': bc, 'name': bc.book_name})
+        elif ch.id in legacy_by_channel:
+            club = legacy_by_channel[ch.id]
+            all_archived.append({'type': 'legacy', 'data': club, 'name': club['name']})
+        else:
+            all_archived.append({
+                'type': 'untracked',
+                'data': ch,
+                'name': ch.name.replace('-', ' ').title()
+            })
 
     if not all_archived:
         await interaction.response.send_message("No archived book clubs available to unarchive.", ephemeral=True)
