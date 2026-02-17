@@ -848,8 +848,11 @@ async def sync_commands(interaction: discord.Interaction):
     """Force re-sync all commands with Discord"""
     await interaction.response.defer(ephemeral=True)
     try:
-        synced = await bot.tree.sync()
-        await interaction.followup.send(f"✅ Re-synced {len(synced)} command(s) with Discord. Changes may take a few minutes to appear.", ephemeral=True)
+        # Sync globally
+        global_synced = await bot.tree.sync()
+        # Also sync to this specific guild for instant update
+        guild_synced = await bot.tree.sync(guild=interaction.guild)
+        await interaction.followup.send(f"✅ Synced {len(global_synced)} global and {len(guild_synced)} guild command(s). Guild commands update instantly!", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"Error syncing commands: {str(e)}", ephemeral=True)
 
@@ -936,7 +939,7 @@ async def archive_bookclub(interaction: discord.Interaction):
         await interaction.response.send_message(f"Error archiving book club: {str(e)}", ephemeral=True)
 
 @bot.tree.command(name="unarchive_bookclub", description="Unarchive a book club (moves back to active)")
-async def unarchive_bookclub(interaction: discord.Interaction, channel: discord.TextChannel):
+async def unarchive_bookclub(interaction: discord.Interaction):
     """Unarchive a book club and move it back to active"""
     await interaction.response.defer(ephemeral=True)
     
