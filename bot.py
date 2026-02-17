@@ -853,39 +853,62 @@ async def create_bookclub(interaction: discord.Interaction):
 
 @tree.command(name="add_member", description="Add a member to a book club")
 async def add_member(interaction: discord.Interaction, channel: discord.TextChannel, member: discord.Member):
-    """Add a member to a book club"""
+    """Add a member to a book club (bot-managed or legacy)"""
     await interaction.response.defer(ephemeral=True)
     
-    # Check if specified channel is a book club
-    book_club_id = f"{interaction.guild.id}_{channel.id}"
-    if book_club_id not in book_clubs:
-        await interaction.followup.send("That channel is not a book club.", ephemeral=True)
-        return
+    guild_id = interaction.guild.id
     
-    book_club = book_clubs[book_club_id]
+    # Check if it's a bot-managed book club
+    book_club_id = f"{guild_id}_{channel.id}"
+    if book_club_id in book_clubs:
+        book_club = book_clubs[book_club_id]
+        
+        # Check if member is already in the book club
+        if member.id in book_club.members:
+            await interaction.followup.send(f"{member.mention} is already in this book club.", ephemeral=True)
+            return
+        
+        # Add permissions to channel
+        await channel.set_permissions(member, read_messages=True, send_messages=True)
+        
+        # Add to all threads
+        for thread_id in book_club.thread_ids.values():
+            try:
+                thread = await interaction.guild.fetch_channel(thread_id)
+                await thread.add_user(member)
+            except:
+                pass
+        
+        book_club.members.append(member.id)
+        save_book_clubs()
+        
+        await interaction.followup.send(f"✅ Added {member.mention} to {channel.mention}!", ephemeral=True)
     
-    # Check if member is already in the book club
-    if member.id in book_club.members:
-        await interaction.followup.send(f"{member.mention} is already in this book club.", ephemeral=True)
-        return
-    
-    # Add permissions to channel
-    await channel.set_permissions(member, read_messages=True, send_messages=True)
-    
-    # Add to all threads
-    for thread_id in book_club.thread_ids.values():
-        try:
-            thread = await interaction.guild.fetch_channel(thread_id)
-            await thread.add_user(member)
-        except:
-            pass
-    
-    book_club.members.append(member.id)
-    
-    # Save to file
-    save_book_clubs()
-    
-    await interaction.followup.send(f"✅ Added {member.mention} to {channel.mention}!", ephemeral=True)
+    # Check if it's a legacy book club
+    elif guild_id in manual_book_clubs:
+        is_legacy = any(club['channel_id'] == channel.id for club in manual_book_clubs[guild_id])
+        
+        if is_legacy:
+            # Just add permissions - legacy clubs don't track members
+            try:
+                await channel.set_permissions(member, read_messages=True, send_messages=True)
+                await interaction.followup.send(
+                    f"✅ Added {member.mention} to {channel.mention}!\n"
+                    f"*(Legacy book club - member list not tracked by bot)*",
+                    ephemeral=True
+                )
+            except Exception as e:
+                await interaction.followup.send(f"❌ Failed to add member: {str(e)}", ephemeral=True)
+        else:
+            await interaction.followup.send(
+                f"That channel is not a recognized book club. Use `/import_legacy_books` or `/unarchive_bookclub` to register it first.",
+                ephemeral=True
+            )
+    else:
+        await interaction.followup.send(
+            f"That channel is not a recognized book club. Use `/import_legacy_books` or `/unarchive_bookclub` to register it first.",
+            ephemeral=True
+        )
 
 
 @tree.command(name="set_directory", description="Set this channel as the book club directory")
@@ -969,18 +992,27 @@ async def archive_bookclub(interaction: discord.Interaction):
 @tree.command(name="join_bookclub", description="Join an active book club")
 async def join_bookclub(interaction: discord.Interaction):
     """Join an active book club by selecting from a list"""
-    # Get all active book clubs for this guild
-    guild_book_clubs = [bc for bc in book_clubs.values() if bc.guild_id == interaction.guild.id and not bc.is_archived]
+    guild_id = interaction.guild.id
     
-    if not guild_book_clubs:
+    # Get all active bot-managed book clubs
+    managed_clubs = [bc for bc in book_clubs.values() if bc.guild_id == guild_id and not bc.is_archived]
+    
+    # Get all active legacy book clubs
+    legacy_clubs = [bc for bc in manual_book_clubs.get(guild_id, []) if not bc.get('archived', False)]
+    
+    # Build combined list
+    all_clubs = []
+    for bc in sorted(managed_clubs, key=lambda x: x.book_name):
+        all_clubs.append({'type': 'managed', 'data': bc, 'name': bc.book_name})
+    for bc in sorted(legacy_clubs, key=lambda x: x['name']):
+        all_clubs.append({'type': 'legacy', 'data': bc, 'name': bc['name']})
+    
+    if not all_clubs:
         await interaction.response.send_message("No active book clubs available to join.", ephemeral=True)
         return
     
-    # Sort by book name
-    guild_book_clubs.sort(key=lambda x: x.book_name)
-    
-    # Create a dropdown with book club options (max 25 for Discord select menus)
-    if len(guild_book_clubs) > 25:
+    # Check 25-item limit
+    if len(all_clubs) > 25:
         await interaction.response.send_message(
             "There are too many book clubs to display in a menu. Please use `/add_member` with a specific channel.",
             ephemeral=True
@@ -992,20 +1024,24 @@ async def join_bookclub(interaction: discord.Interaction):
     from discord.ui import Select, View
     
     options = []
-    book_club_map = {}
-    for i, bc in enumerate(guild_book_clubs):
-        # Check if user is already a member
-        is_member = interaction.user.id in bc.members
-        label = bc.book_name
-        if is_member:
-            label += " ✓"
+    for i, club in enumerate(all_clubs):
+        if club['type'] == 'managed':
+            bc = club['data']
+            is_member = interaction.user.id in bc.members
+            label = bc.book_name
+            if is_member:
+                label += " ✓"
+            desc = f"{len(bc.chapters)} chapters" + (" - Already joined" if is_member else "")
+        else:
+            # Legacy club - can't track membership
+            label = club['name'] + " 📘"
+            desc = "Legacy book club"
         
         options.append(SelectOption(
-            label=label[:100],  # Discord max label length
-            description=f"{len(bc.chapters)} chapters" + (" - Already joined" if is_member else ""),
+            label=label[:100],
+            description=desc[:100],
             value=str(i)
         ))
-        book_club_map[str(i)] = bc
     
     # Create the select menu
     select = Select(
@@ -1014,39 +1050,65 @@ async def join_bookclub(interaction: discord.Interaction):
     )
     
     async def select_callback(select_interaction):
-        selected_index = select.values[0]
-        selected_bc = book_club_map[selected_index]
+        selected = all_clubs[int(select.values[0])]
         
-        # Check if already a member
-        if select_interaction.user.id in selected_bc.members:
-            await select_interaction.response.send_message(
-                f"You're already a member of **{selected_bc.book_name}**!",
-                ephemeral=True
-            )
-            return
-        
-        # Add the user to the book club
         try:
-            channel = await interaction.guild.fetch_channel(selected_bc.channel_id)
-            
-            # Add permissions to channel
-            await channel.set_permissions(select_interaction.user, read_messages=True, send_messages=True)
-            
-            # Add to all threads
-            for thread_id in selected_bc.thread_ids.values():
+            if selected['type'] == 'managed':
+                bc = selected['data']
+                
+                # Check if already a member
+                if select_interaction.user.id in bc.members:
+                    await select_interaction.response.send_message(
+                        f"You're already a member of **{bc.book_name}**!",
+                        ephemeral=True
+                    )
+                    return
+                
                 try:
-                    thread = await interaction.guild.fetch_channel(thread_id)
-                    await thread.add_user(select_interaction.user)
-                except:
-                    pass
+                    channel = await interaction.guild.fetch_channel(bc.channel_id)
+                    
+                    # Add permissions to channel
+                    await channel.set_permissions(select_interaction.user, read_messages=True, send_messages=True)
+                    
+                    # Add to all threads
+                    for thread_id in bc.thread_ids.values():
+                        try:
+                            thread = await interaction.guild.fetch_channel(thread_id)
+                            await thread.add_user(select_interaction.user)
+                        except:
+                            pass
+                    
+                    bc.members.append(select_interaction.user.id)
+                    save_book_clubs()
+                    
+                    await select_interaction.response.send_message(
+                        f"✅ You've joined **{bc.book_name}**! Check out {channel.mention}",
+                        ephemeral=True
+                    )
+                except Exception as e:
+                    await select_interaction.response.send_message(
+                        f"❌ Failed to join: {str(e)}\n\nBot needs proper permissions.",
+                        ephemeral=True
+                    )
             
-            selected_bc.members.append(select_interaction.user.id)
-            save_book_clubs()
-            
-            await select_interaction.response.send_message(
-                f"✅ You've joined **{selected_bc.book_name}**! Check out {channel.mention}",
-                ephemeral=True
-            )
+            else:
+                # Legacy club - just add permissions
+                club = selected['data']
+                try:
+                    channel = await interaction.guild.fetch_channel(club['channel_id'])
+                    await channel.set_permissions(select_interaction.user, read_messages=True, send_messages=True)
+                    
+                    await select_interaction.response.send_message(
+                        f"✅ You've joined **{club['name']}**! Check out {channel.mention}\n"
+                        f"*(Legacy book club - member list not tracked by bot)*",
+                        ephemeral=True
+                    )
+                except Exception as e:
+                    await select_interaction.response.send_message(
+                        f"❌ Failed to join: {str(e)}\n\nBot needs 'Manage Roles' or 'Manage Channels' permission.",
+                        ephemeral=True
+                    )
+        
         except Exception as e:
             await select_interaction.response.send_message(
                 f"Error joining book club: {str(e)}",
