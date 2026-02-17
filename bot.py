@@ -1064,30 +1064,37 @@ async def join_bookclub(interaction: discord.Interaction):
     )
 
 
-@tree.command(name="unarchive_bookclub", description="Unarchive a book club")
-async def unarchive_bookclub(interaction: discord.Interaction):
-    """Unarchive a book club by selecting from a list"""
+@tree.command(name="unarchive_bookclub", description="Unarchive a book club channel")
+async def unarchive_bookclub(interaction: discord.Interaction, channel: discord.TextChannel):
+    """Unarchive any text channel from the archive (or active) category"""
     guild = interaction.guild
     guild_id = guild.id
 
-    # Use the archive category as the source of truth — anything physically
-    # in that category is considered archived, regardless of JSON flags.
-    if guild_id not in archive_categories:
-        await interaction.response.send_message(
-            "No archive category set. Use `/set_archive_category` first so the bot knows where to look.",
+    await interaction.response.defer(ephemeral=True)
+
+    # Verify the channel is in the archive or active category
+    archive_cat_id = archive_categories.get(guild_id)
+    active_cat_id = active_categories.get(guild_id)
+    channel_cat_id = channel.category_id
+
+    if channel_cat_id not in (archive_cat_id, active_cat_id):
+        cat_names = []
+        if archive_cat_id:
+            cat = guild.get_channel(archive_cat_id)
+            if cat:
+                cat_names.append(f"**{cat.name}**")
+        if active_cat_id:
+            cat = guild.get_channel(active_cat_id)
+            if cat:
+                cat_names.append(f"**{cat.name}**")
+        hint = f" It must be in {' or '.join(cat_names)}." if cat_names else ""
+        await interaction.followup.send(
+            f"{channel.mention} doesn't appear to be in a recognised book club category.{hint}",
             ephemeral=True
         )
         return
 
-    archive_cat = guild.get_channel(archive_categories[guild_id])
-    if not archive_cat:
-        await interaction.response.send_message(
-            "The configured archive category could not be found. Please run `/set_archive_category` again.",
-            ephemeral=True
-        )
-        return
-
-    # Build lookup maps for quick classification
+    # Classify the channel
     managed_by_channel = {
         bc.channel_id: bc
         for bc in book_clubs.values()
@@ -1098,127 +1105,54 @@ async def unarchive_bookclub(interaction: discord.Interaction):
         for club in manual_book_clubs.get(guild_id, [])
     }
 
-    all_archived = []
-    for ch in sorted(archive_cat.text_channels, key=lambda x: x.name):
-        if ch.id in managed_by_channel:
-            bc = managed_by_channel[ch.id]
-            all_archived.append({'type': 'managed', 'data': bc, 'name': bc.book_name})
-        elif ch.id in legacy_by_channel:
-            club = legacy_by_channel[ch.id]
-            all_archived.append({'type': 'legacy', 'data': club, 'name': club['name']})
-        else:
-            all_archived.append({
-                'type': 'untracked',
-                'data': ch,
-                'name': ch.name.replace('-', ' ').title()
-            })
+    try:
+        # Resolve active category once
+        active_cat = guild.get_channel(active_cat_id) if active_cat_id else None
 
-    if not all_archived:
-        await interaction.response.send_message("No archived book clubs available to unarchive.", ephemeral=True)
-        return
-
-    if len(all_archived) > 25:
-        await interaction.response.send_message(
-            "There are too many archived book clubs to display in a menu. Please contact an admin.",
-            ephemeral=True
-        )
-        return
-
-    from discord import SelectOption
-    from discord.ui import Select, View
-
-    options = []
-    for i, club in enumerate(all_archived):
-        if club['type'] == 'managed':
-            label = club['name']
-            desc = f"Bot-managed · {len(club['data'].chapters)} chapters"
-        elif club['type'] == 'legacy':
-            label = club['name'] + " 📘"
-            desc = "Legacy book club"
-        else:
-            label = club['name'] + " 📁"
-            desc = "Untracked channel — will be added to directory"
-        options.append(SelectOption(label=label[:100], description=desc[:100], value=str(i)))
-
-    select = Select(placeholder="Choose a book club to unarchive...", options=options)
-
-    async def select_callback(select_interaction):
-        await select_interaction.response.defer(ephemeral=True)
-        selected = all_archived[int(select.values[0])]
-
-        try:
-            # Determine the active category message suffix
-            active_cat_name = None
-            if guild_id in active_categories:
-                active_cat = await guild.fetch_channel(active_categories[guild_id])
-                active_cat_name = active_cat.name
-
-            if selected['type'] == 'managed':
-                bc = selected['data']
-                book_channel = await guild.fetch_channel(bc.channel_id)
-
-                if active_cat_name:
-                    await book_channel.edit(category=active_cat)
-                    message = f"✅ **{bc.book_name}** unarchived and moved to **{active_cat_name}**! Check out {book_channel.mention}"
-                else:
-                    message = f"✅ **{bc.book_name}** unarchived! Check out {book_channel.mention}"
-
-                bc.is_archived = False
-
-                book_club_id = f"{bc.guild_id}_{bc.channel_id}"
-                inactivity_notified.discard(book_club_id)
-
-                save_book_clubs()
-
-            elif selected['type'] == 'legacy':
-                book_channel = await guild.fetch_channel(selected['data']['channel_id'])
-
-                if active_cat_name:
-                    await book_channel.edit(category=active_cat)
-                    message = f"✅ **{selected['name']}** unarchived and moved to **{active_cat_name}**! Check out {book_channel.mention}"
-                else:
-                    message = f"✅ **{selected['name']}** unarchived! Check out {book_channel.mention}"
-
-                for club in manual_book_clubs.get(guild_id, []):
-                    if club['channel_id'] == selected['data']['channel_id']:
-                        club['archived'] = False
-                        break
-                save_manual_book_clubs()
-
+        if channel.id in managed_by_channel:
+            bc = managed_by_channel[channel.id]
+            if active_cat:
+                await channel.edit(category=active_cat)
+                message = f"✅ **{bc.book_name}** unarchived and moved to **{active_cat.name}**! Check out {channel.mention}"
             else:
-                # Untracked channel — move it and register it as an active legacy club
-                book_channel = selected['data']
-                book_name = selected['name']
+                message = f"✅ **{bc.book_name}** unarchived! Check out {channel.mention}"
+            bc.is_archived = False
+            inactivity_notified.discard(f"{guild_id}_{channel.id}")
+            save_book_clubs()
 
-                if active_cat_name:
-                    await book_channel.edit(category=active_cat)
-                    message = f"✅ **{book_name}** unarchived and moved to **{active_cat_name}**! Check out {book_channel.mention}"
-                else:
-                    message = f"✅ **{book_name}** unarchived! Check out {book_channel.mention}"
+        elif channel.id in legacy_by_channel:
+            club = legacy_by_channel[channel.id]
+            book_name = club['name']
+            if active_cat:
+                await channel.edit(category=active_cat)
+                message = f"✅ **{book_name}** unarchived and moved to **{active_cat.name}**! Check out {channel.mention}"
+            else:
+                message = f"✅ **{book_name}** unarchived! Check out {channel.mention}"
+            club['archived'] = False
+            save_manual_book_clubs()
 
-                # Register in manual_book_clubs so it appears in the directory
-                # and members can be added via /join_bookclub or /add_member
-                if guild_id not in manual_book_clubs:
-                    manual_book_clubs[guild_id] = []
-                manual_book_clubs[guild_id].append({
-                    'name': book_name,
-                    'channel_id': book_channel.id,
-                    'archived': False
-                })
-                save_manual_book_clubs()
+        else:
+            # Completely untracked — register it as a legacy club and move it
+            book_name = channel.name.replace('-', ' ').title()
+            if active_cat:
+                await channel.edit(category=active_cat)
+                message = f"✅ **{book_name}** unarchived and moved to **{active_cat.name}**! Check out {channel.mention}"
+            else:
+                message = f"✅ **{book_name}** unarchived! Check out {channel.mention}"
+            if guild_id not in manual_book_clubs:
+                manual_book_clubs[guild_id] = []
+            manual_book_clubs[guild_id].append({
+                'name': book_name,
+                'channel_id': channel.id,
+                'archived': False
+            })
+            save_manual_book_clubs()
 
-            # Update the directory
-            await update_book_club_list(guild)
-            await select_interaction.followup.send(message, ephemeral=True)
+        await update_book_club_list(guild)
+        await interaction.followup.send(message, ephemeral=True)
 
-        except Exception as e:
-            await select_interaction.followup.send(f"Error unarchiving book club: {str(e)}", ephemeral=True)
-
-    select.callback = select_callback
-    view = View()
-    view.add_item(select)
-    
-    await interaction.response.send_message("Select a book club to unarchive:", view=view, ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"Error unarchiving book club: {str(e)}", ephemeral=True)
 
 
 @tree.command(name="import_legacy_books", description="Import manually created book club channels")
