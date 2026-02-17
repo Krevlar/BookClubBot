@@ -1072,42 +1072,40 @@ async def unarchive_bookclub(interaction: discord.Interaction, channel: discord.
 
     await interaction.response.defer(ephemeral=True)
 
-    # Verify the channel is in the archive or active category
-    archive_cat_id = archive_categories.get(guild_id)
-    active_cat_id = active_categories.get(guild_id)
-    channel_cat_id = channel.category_id
-
-    if channel_cat_id not in (archive_cat_id, active_cat_id):
-        cat_names = []
-        if archive_cat_id:
-            cat = guild.get_channel(archive_cat_id)
-            if cat:
-                cat_names.append(f"**{cat.name}**")
-        if active_cat_id:
-            cat = guild.get_channel(active_cat_id)
-            if cat:
-                cat_names.append(f"**{cat.name}**")
-        hint = f" It must be in {' or '.join(cat_names)}." if cat_names else ""
-        await interaction.followup.send(
-            f"{channel.mention} doesn't appear to be in a recognised book club category.{hint}",
-            ephemeral=True
-        )
-        return
-
-    # Classify the channel
-    managed_by_channel = {
-        bc.channel_id: bc
-        for bc in book_clubs.values()
-        if bc.guild_id == guild_id
-    }
-    legacy_by_channel = {
-        club['channel_id']: club
-        for club in manual_book_clubs.get(guild_id, [])
-    }
-
     try:
-        # Resolve active category once
-        active_cat = guild.get_channel(active_cat_id) if active_cat_id else None
+        archive_cat_id = archive_categories.get(guild_id)
+        active_cat_id = active_categories.get(guild_id)
+
+        # Verify the channel is in the archive or active category
+        if channel.category_id not in (archive_cat_id, active_cat_id):
+            cat_names = []
+            for cid in (archive_cat_id, active_cat_id):
+                if cid:
+                    try:
+                        cat = await guild.fetch_channel(cid)
+                        cat_names.append(f"**{cat.name}**")
+                    except Exception:
+                        pass
+            hint = f" It must be in {' or '.join(cat_names)}." if cat_names else ""
+            await interaction.followup.send(
+                f"{channel.mention} doesn't appear to be in a recognised book club category.{hint}",
+                ephemeral=True
+            )
+            return
+
+        # Classify the channel
+        managed_by_channel = {
+            bc.channel_id: bc
+            for bc in book_clubs.values()
+            if bc.guild_id == guild_id
+        }
+        legacy_by_channel = {
+            club['channel_id']: club
+            for club in manual_book_clubs.get(guild_id, [])
+        }
+
+        # Use fetch_channel (API call) not get_channel (cache only) — categories are often not cached
+        active_cat = await guild.fetch_channel(active_cat_id) if active_cat_id else None
 
         if channel.id in managed_by_channel:
             bc = managed_by_channel[channel.id]
@@ -1148,11 +1146,15 @@ async def unarchive_bookclub(interaction: discord.Interaction, channel: discord.
             })
             save_manual_book_clubs()
 
-        await update_book_club_list(guild)
+        # Respond immediately, then update the directory in the background
         await interaction.followup.send(message, ephemeral=True)
+        asyncio.create_task(update_book_club_list(guild))
 
     except Exception as e:
-        await interaction.followup.send(f"Error unarchiving book club: {str(e)}", ephemeral=True)
+        try:
+            await interaction.followup.send(f"Error unarchiving book club: {str(e)}", ephemeral=True)
+        except Exception:
+            print(f"unarchive_bookclub failed and could not send error: {e}")
 
 
 @tree.command(name="import_legacy_books", description="Import manually created book club channels")
