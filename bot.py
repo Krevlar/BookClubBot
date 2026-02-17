@@ -1110,10 +1110,14 @@ async def unarchive_bookclub(interaction: discord.Interaction, channel: discord.
         if channel.id in managed_by_channel:
             bc = managed_by_channel[channel.id]
             if active_cat:
-                await channel.edit(category=active_cat)
-                message = f"✅ **{bc.book_name}** unarchived and moved to **{active_cat.name}**! Check out {channel.mention}"
+                try:
+                    await channel.edit(category=active_cat)
+                    message = f"✅ **{bc.book_name}** unarchived and moved to **{active_cat.name}**! Check out {channel.mention}"
+                except Exception as e:
+                    await interaction.followup.send(f"❌ Failed to move channel: {str(e)}\n\nBot needs 'Manage Channels' permission.", ephemeral=True)
+                    return
             else:
-                message = f"✅ **{bc.book_name}** unarchived! Check out {channel.mention}"
+                message = f"✅ **{bc.book_name}** marked as unarchived! (No active category set, so channel wasn't moved.)"
             bc.is_archived = False
             inactivity_notified.discard(f"{guild_id}_{channel.id}")
             save_book_clubs()
@@ -1122,10 +1126,14 @@ async def unarchive_bookclub(interaction: discord.Interaction, channel: discord.
             club = legacy_by_channel[channel.id]
             book_name = club['name']
             if active_cat:
-                await channel.edit(category=active_cat)
-                message = f"✅ **{book_name}** unarchived and moved to **{active_cat.name}**! Check out {channel.mention}"
+                try:
+                    await channel.edit(category=active_cat)
+                    message = f"✅ **{book_name}** unarchived and moved to **{active_cat.name}**! Check out {channel.mention}"
+                except Exception as e:
+                    await interaction.followup.send(f"❌ Failed to move channel: {str(e)}\n\nBot needs 'Manage Channels' permission.", ephemeral=True)
+                    return
             else:
-                message = f"✅ **{book_name}** unarchived! Check out {channel.mention}"
+                message = f"✅ **{book_name}** marked as unarchived! (No active category set, so channel wasn't moved.)"
             club['archived'] = False
             save_manual_book_clubs()
 
@@ -1133,10 +1141,14 @@ async def unarchive_bookclub(interaction: discord.Interaction, channel: discord.
             # Completely untracked — register it as a legacy club and move it
             book_name = channel.name.replace('-', ' ').title()
             if active_cat:
-                await channel.edit(category=active_cat)
-                message = f"✅ **{book_name}** unarchived and moved to **{active_cat.name}**! Check out {channel.mention}"
+                try:
+                    await channel.edit(category=active_cat)
+                    message = f"✅ **{book_name}** unarchived and moved to **{active_cat.name}**! Check out {channel.mention}"
+                except Exception as e:
+                    await interaction.followup.send(f"❌ Failed to move channel: {str(e)}\n\nBot needs 'Manage Channels' permission.", ephemeral=True)
+                    return
             else:
-                message = f"✅ **{book_name}** unarchived! Check out {channel.mention}"
+                message = f"✅ **{book_name}** marked as unarchived! (No active category set, so channel wasn't moved.)"
             if guild_id not in manual_book_clubs:
                 manual_book_clubs[guild_id] = []
             manual_book_clubs[guild_id].append({
@@ -1146,7 +1158,7 @@ async def unarchive_bookclub(interaction: discord.Interaction, channel: discord.
             })
             save_manual_book_clubs()
 
-        # Respond immediately, then update the directory in the background
+        # Respond with the result, then update the directory in the background
         await interaction.followup.send(message, ephemeral=True)
         asyncio.create_task(update_book_club_list(guild))
 
