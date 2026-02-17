@@ -1,3 +1,285 @@
+import discord
+from discord import app_commands
+from discord.ext import tasks
+import json
+import os
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict
+import re
+import asyncio
+
+# ==================== BOT SETUP ====================
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+
+client = discord.Client(intents=intents)
+tree = app_commands.CommandTree(client)
+
+# ==================== DATA FILES ====================
+
+DATA_FILE = 'bookclubs.json'
+DIRECTORY_FILE = 'directories.json'
+ARCHIVE_FILE = 'archives.json'
+MANUAL_FILE = 'manual_bookclubs.json'
+ACTIVE_FILE = 'active_categories.json'
+
+# Global data stores (matching existing bot structure)
+book_clubs = {}  # {book_club_id: BookClub object}
+directory_channels = {}  # {guild_id: {'channel_id': id, 'message_ids': [...]}}
+archive_categories = {}  # {guild_id: category_id}
+manual_book_clubs = {}  # {guild_id: [{'name': str, 'channel_id': int, 'archived': bool}]}
+active_categories = {}  # {guild_id: category_id}
+inactivity_notified = set()  # Track which book clubs have had creator notified
+
+
+# ==================== BOOKCLUB CLASS ====================
+
+class BookClub:
+    """Book club data structure matching existing bot format"""
+    def __init__(self, guild_id, book_name, channel_id, thread_ids, members, chapters, 
+                 guide_message_ids=None, is_archived=False, creator_id=None, inactive_members=None):
+        self.guild_id = guild_id
+        self.book_name = book_name
+        self.channel_id = channel_id
+        self.thread_ids = thread_ids  # {chapter_name: thread_id}
+        self.members = members  # List of member IDs (integers)
+        self.chapters = chapters  # List of chapter names
+        self.guide_message_ids = guide_message_ids or []
+        self.is_archived = is_archived
+        self.creator_id = creator_id
+        self.inactive_members = inactive_members or []
+
+
+# ==================== DATA PERSISTENCE ====================
+
+def save_book_clubs():
+    """Save book clubs to file in existing format"""
+    data = {}
+    for book_club_id, book_club in book_clubs.items():
+        data[book_club_id] = {
+            'guild_id': book_club.guild_id,
+            'book_name': book_club.book_name,
+            'channel_id': book_club.channel_id,
+            'thread_ids': book_club.thread_ids,
+            'members': book_club.members,
+            'chapters': book_club.chapters,
+            'guide_message_ids': book_club.guide_message_ids,
+            'is_archived': book_club.is_archived,
+            'creator_id': book_club.creator_id,
+            'inactive_members': book_club.inactive_members
+        }
+    with open(DATA_FILE, 'w') as f:
+        json.dump(data, f, indent=2)
+
+
+def save_directories():
+    """Save directory channels to file"""
+    with open(DIRECTORY_FILE, 'w') as f:
+        json.dump(directory_channels, f, indent=2)
+
+
+def save_archive_categories():
+    """Save archive categories to file"""
+    with open(ARCHIVE_FILE, 'w') as f:
+        json.dump(archive_categories, f, indent=2)
+
+
+def save_manual_book_clubs():
+    """Save manual book clubs to file"""
+    with open(MANUAL_FILE, 'w') as f:
+        json.dump(manual_book_clubs, f, indent=2)
+
+
+def save_active_categories():
+    """Save active categories to file"""
+    with open(ACTIVE_FILE, 'w') as f:
+        json.dump(active_categories, f, indent=2)
+
+
+def load_book_clubs():
+    """Load book clubs from file"""
+    global book_clubs
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, 'r') as f:
+            data = json.load(f)
+            for book_club_id, bc_data in data.items():
+                book_clubs[book_club_id] = BookClub(
+                    bc_data['guild_id'],
+                    bc_data['book_name'],
+                    bc_data['channel_id'],
+                    bc_data['thread_ids'],
+                    bc_data['members'],
+                    bc_data['chapters'],
+                    bc_data.get('guide_message_ids', []),
+                    bc_data.get('is_archived', False),
+                    bc_data.get('creator_id'),
+                    bc_data.get('inactive_members', [])
+                )
+
+
+def load_directories():
+    """Load directory channels from file"""
+    global directory_channels
+    if os.path.exists(DIRECTORY_FILE):
+        with open(DIRECTORY_FILE, 'r') as f:
+            directory_channels = json.load(f)
+            # Convert string keys to integers
+            directory_channels = {int(k): v for k, v in directory_channels.items()}
+
+
+def load_archive_categories():
+    """Load archive categories from file"""
+    global archive_categories
+    if os.path.exists(ARCHIVE_FILE):
+        with open(ARCHIVE_FILE, 'r') as f:
+            archive_categories = json.load(f)
+            # Convert string keys to integers
+            archive_categories = {int(k): int(v) for k, v in archive_categories.items()}
+
+
+def load_manual_book_clubs():
+    """Load manual book clubs from file"""
+    global manual_book_clubs
+    if os.path.exists(MANUAL_FILE):
+        with open(MANUAL_FILE, 'r') as f:
+            manual_book_clubs = json.load(f)
+            # Convert string keys to integers
+            manual_book_clubs = {int(k): v for k, v in manual_book_clubs.items()}
+            
+            # Migration: add 'archived' field to any entries missing it
+            migrated = False
+            for guild_id, clubs in manual_book_clubs.items():
+                for club in clubs:
+                    if 'archived' not in club:
+                        club['archived'] = False
+                        migrated = True
+            
+            if migrated:
+                save_manual_book_clubs()
+
+
+def load_active_categories():
+    """Load active categories from file"""
+    global active_categories
+    if os.path.exists(ACTIVE_FILE):
+        with open(ACTIVE_FILE, 'r') as f:
+            active_categories = json.load(f)
+            # Convert string keys to integers
+            active_categories = {int(k): int(v) for k, v in active_categories.items()}
+
+
+# ==================== HELPER FUNCTIONS ====================
+
+def parse_chapters(chapter_string):
+    """Parse chapter string like 'Prologue, 1-5, Epilogue' into a list of chapter names"""
+    chapters = []
+    parts = [p.strip() for p in chapter_string.split(',')]
+    
+    for part in parts:
+        # Check if it's a range (e.g., "1-5")
+        if '-' in part and all(x.strip().isdigit() for x in part.split('-')):
+            range_parts = part.split('-')
+            start = int(range_parts[0].strip())
+            end = int(range_parts[1].strip())
+            for i in range(start, end + 1):
+                chapters.append(f"Chapter {i}")
+        # Check if it's just a number
+        elif part.isdigit():
+            chapters.append(f"Chapter {part}")
+        # Otherwise it's a named chapter
+        else:
+            chapters.append(part)
+    
+    return chapters
+
+
+def split_into_chunks(text, max_length):
+    """Split text into chunks at chapter boundaries when possible"""
+    if len(text) <= max_length:
+        return [text]
+    
+    chunks = []
+    current_chunk = ""
+    lines = text.split('\n')
+    
+    for line in lines:
+        # If adding this line would exceed limit
+        if len(current_chunk) + len(line) + 1 > max_length:
+            # If current chunk is not empty, save it
+            if current_chunk:
+                chunks.append(current_chunk.rstrip())
+                current_chunk = ""
+            
+            # If single line is too long, split it
+            if len(line) > max_length:
+                # Split long line into words
+                words = line.split(' ')
+                for word in words:
+                    if len(current_chunk) + len(word) + 1 > max_length:
+                        chunks.append(current_chunk.rstrip())
+                        current_chunk = word + " "
+                    else:
+                        current_chunk += word + " "
+            else:
+                current_chunk = line + "\n"
+        else:
+            current_chunk += line + "\n"
+    
+    # Add remaining chunk
+    if current_chunk:
+        chunks.append(current_chunk.rstrip())
+    
+    # Wrap each chunk in spoiler tags
+    wrapped_chunks = [f"||{chunk}||" for chunk in chunks]
+    
+    return wrapped_chunks
+
+
+async def generate_guide_content(book_club, guild):
+    """Generate the discussion guide content"""
+    guide_parts = []
+    
+    for chapter in book_club.chapters:
+        thread_id = book_club.thread_ids.get(chapter)
+        if not thread_id:
+            continue
+        
+        try:
+            thread = await guild.fetch_channel(thread_id)
+            messages = []
+            
+            async for msg in thread.history(limit=None, oldest_first=True):
+                if msg.author.bot or msg.type != discord.MessageType.default:
+                    continue
+                
+                # Remove spoiler tags from content
+                clean_content = msg.content.replace('||', '')
+                
+                # Check if this is a reply to another message
+                if msg.reference and msg.reference.message_id:
+                    try:
+                        replied_msg = await thread.fetch_message(msg.reference.message_id)
+                        replied_author = replied_msg.author.display_name
+                        messages.append(f"  **{msg.author.display_name}** (replying to {replied_author}): {clean_content}")
+                    except:
+                        # If we can't fetch the replied message, just show it as a regular message
+                        messages.append(f"**{msg.author.display_name}**: {clean_content}")
+                else:
+                    messages.append(f"**{msg.author.display_name}**: {clean_content}")
+            
+            if messages:
+                guide_parts.append(f"\n## {chapter}\n" + "\n".join(messages))
+        
+        except Exception as e:
+            print(f"Error retrieving messages for {chapter}: {e}")
+            guide_parts.append(f"\n## {chapter}\n*Error retrieving messages*")
+    
+    # Return content WITHOUT spoiler tags - they'll be added when splitting
+    return "\n".join(guide_parts)
+
+
 async def update_discussion_guide(book_club, guild):
     """Update the live discussion guide, splitting into multiple messages if needed"""
     if not book_club.guide_message_ids:
@@ -51,264 +333,7 @@ async def update_discussion_guide(book_club, guild):
     
     except Exception as e:
         print(f"Error updating discussion guide: {e}")
-import discord
-from discord.ext import commands, tasks
-import asyncio
-import json
-import os
-from datetime import datetime, timedelta
 
-# Bot setup
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-bot = commands.Bot(command_prefix='!', intents=intents)
-
-# Store book club data
-book_clubs = {}
-directory_channels = {}  # {guild_id: {'channel_id': id, 'message_ids': [id1, id2, id3]}}
-archive_categories = {}  # {guild_id: category_id}
-manual_book_clubs = {}  # {guild_id: [{'name': str, 'channel_id': int, 'archived': bool}]}
-DATA_FILE = 'bookclubs.json'
-DIRECTORY_FILE = 'directories.json'
-ARCHIVE_FILE = 'archives.json'
-MANUAL_FILE = 'manual_bookclubs.json'
-
-def save_book_clubs():
-    """Save book clubs to file"""
-    data = {}
-    for book_club_id, book_club in book_clubs.items():
-        data[book_club_id] = {
-            'guild_id': book_club.guild_id,
-            'book_name': book_club.book_name,
-            'channel_id': book_club.channel_id,
-            'thread_ids': book_club.thread_ids,
-            'members': book_club.members,
-            'chapters': book_club.chapters,
-            'guide_message_ids': book_club.guide_message_ids,
-            'is_archived': book_club.is_archived,
-            'creator_id': book_club.creator_id,
-            'inactive_members': book_club.inactive_members
-        }
-    with open(DATA_FILE, 'w') as f:
-        json.dump(data, f, indent=2)
-
-def save_directories():
-    """Save directory channels to file"""
-    with open(DIRECTORY_FILE, 'w') as f:
-        json.dump(directory_channels, f, indent=2)
-
-def save_archive_categories():
-    """Save archive categories to file"""
-    with open(ARCHIVE_FILE, 'w') as f:
-        json.dump(archive_categories, f, indent=2)
-
-def save_manual_book_clubs():
-    """Save manual book clubs to file"""
-    with open(MANUAL_FILE, 'w') as f:
-        json.dump(manual_book_clubs, f, indent=2)
-
-def load_book_clubs():
-    """Load book clubs from file"""
-    global book_clubs
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r') as f:
-            data = json.load(f)
-            for book_club_id, bc_data in data.items():
-                book_clubs[book_club_id] = BookClub(
-                    bc_data['guild_id'],
-                    bc_data['book_name'],
-                    bc_data['channel_id'],
-                    bc_data['thread_ids'],
-                    bc_data['members'],
-                    bc_data['chapters'],
-                    bc_data['guide_message_ids'],
-                    bc_data.get('is_archived', False),
-                    bc_data.get('creator_id'),
-                    bc_data.get('inactive_members', [])
-                )
-
-def load_directories():
-    """Load directory channels from file"""
-    global directory_channels
-    if os.path.exists(DIRECTORY_FILE):
-        with open(DIRECTORY_FILE, 'r') as f:
-            directory_channels = json.load(f)
-            # Convert string keys to integers
-            directory_channels = {int(k): v for k, v in directory_channels.items()}
-
-def load_archive_categories():
-    """Load archive categories from file"""
-    global archive_categories
-    if os.path.exists(ARCHIVE_FILE):
-        with open(ARCHIVE_FILE, 'r') as f:
-            archive_categories = json.load(f)
-            # Convert string keys to integers
-            archive_categories = {int(k): int(v) for k, v in archive_categories.items()}
-
-def load_manual_book_clubs():
-    """Load manual book clubs from file"""
-    global manual_book_clubs
-    if os.path.exists(MANUAL_FILE):
-        with open(MANUAL_FILE, 'r') as f:
-            manual_book_clubs = json.load(f)
-            # Convert string keys to integers
-            manual_book_clubs = {int(k): v for k, v in manual_book_clubs.items()}
-            
-            # Migration: add 'archived' field to any entries missing it
-            migrated = False
-            for guild_id, clubs in manual_book_clubs.items():
-                for club in clubs:
-                    if 'archived' not in club:
-                        club['archived'] = False
-                        migrated = True
-            
-            if migrated:
-                save_manual_book_clubs()
-                print("Migrated legacy book clubs to include archived field")
-
-def parse_chapters(chapter_string):
-    """Parse chapter string like 'Prologue, 1-5, Epilogue' into a list of chapter names"""
-    chapters = []
-    parts = [p.strip() for p in chapter_string.split(',')]
-    
-    for part in parts:
-        # Check if it's a range (e.g., "1-5")
-        if '-' in part and all(x.strip().isdigit() for x in part.split('-')):
-            range_parts = part.split('-')
-            start = int(range_parts[0].strip())
-            end = int(range_parts[1].strip())
-            for i in range(start, end + 1):
-                chapters.append(f"Chapter {i}")
-        # Check if it's just a number
-        elif part.isdigit():
-            chapters.append(f"Chapter {part}")
-        # Otherwise it's a named chapter
-        else:
-            chapters.append(part)
-    
-    return chapters
-
-class BookClub:
-    def __init__(self, guild_id, book_name, channel_id, thread_ids, members, chapters, guide_message_ids=None, is_archived=False, creator_id=None, inactive_members=None):
-        self.guild_id = guild_id
-        self.book_name = book_name
-        self.channel_id = channel_id
-        self.thread_ids = thread_ids
-        self.members = members
-        self.chapters = chapters
-        self.guide_message_ids = guide_message_ids or []
-        self.is_archived = is_archived
-        self.creator_id = creator_id  # Track who created the book club
-        self.inactive_members = inactive_members or []  # Members who stopped reading
-
-@bot.event
-async def on_ready():
-    print(f'{bot.user} is now running!')
-    load_book_clubs()
-    load_directories()
-    load_archive_categories()
-    load_manual_book_clubs()
-    
-    # Load active categories
-    bot.active_categories = {}
-    active_file = 'active_categories.json'
-    if os.path.exists(active_file):
-        with open(active_file, 'r') as f:
-            data = json.load(f)
-            bot.active_categories = {int(k): int(v) for k, v in data.items()}
-    
-    print(f'Loaded {len(book_clubs)} book club(s)')
-    print(f'Loaded {len(directory_channels)} directory channel(s)')
-    print(f'Loaded {len(archive_categories)} archive category(ies)')
-    print(f'Loaded {len(bot.active_categories)} active category(ies)')
-    print(f'Loaded {len(manual_book_clubs)} guild(s) with manual book clubs')
-    
-    # Start the inactivity check task
-    check_inactive_readers.start()
-    
-    try:
-        synced = await bot.tree.sync()
-        print(f'Synced {len(synced)} command(s)')
-    except Exception as e:
-        print(f'Error syncing commands: {e}')
-
-@bot.event
-async def on_message(message):
-    # Ignore bot messages
-    if message.author.bot:
-        return
-    
-    # Check if message is in a thread that belongs to a book club
-    if isinstance(message.channel, discord.Thread):
-        # Find which book club this thread belongs to
-        for book_club_id, book_club in book_clubs.items():
-            if message.channel.id in book_club.thread_ids.values():
-                # Update the discussion guide
-                await update_discussion_guide(book_club, message.guild)
-                # Update the directory (for reader progress)
-                await update_book_club_list(message.guild)
-                break
-    
-    await bot.process_commands(message)
-
-@bot.event
-async def on_message_edit(before, after):
-    # Ignore bot messages
-    if after.author.bot:
-        return
-    
-    # Check if edited message is in a thread that belongs to a book club
-    if isinstance(after.channel, discord.Thread):
-        # Find which book club this thread belongs to
-        for book_club_id, book_club in book_clubs.items():
-            if after.channel.id in book_club.thread_ids.values():
-                # Update the discussion guide
-                await update_discussion_guide(book_club, after.guild)
-                # Update the directory (for reader progress)
-                await update_book_club_list(after.guild)
-                break
-
-async def generate_guide_content(book_club, guild):
-    """Generate the discussion guide content"""
-    guide_parts = []
-    
-    for chapter in book_club.chapters:
-        thread_id = book_club.thread_ids.get(chapter)
-        if not thread_id:
-            continue
-        
-        try:
-            thread = await guild.fetch_channel(thread_id)
-            messages = []
-            
-            async for msg in thread.history(limit=None, oldest_first=True):
-                if msg.author.bot or msg.type != discord.MessageType.default:
-                    continue
-                
-                # Remove spoiler tags from content
-                clean_content = msg.content.replace('||', '')
-                
-                # Check if this is a reply to another message
-                if msg.reference and msg.reference.message_id:
-                    try:
-                        replied_msg = await thread.fetch_message(msg.reference.message_id)
-                        replied_author = replied_msg.author.display_name
-                        messages.append(f"  **{msg.author.display_name}** (replying to {replied_author}): {clean_content}")
-                    except:
-                        # If we can't fetch the replied message, just show it as a regular message
-                        messages.append(f"**{msg.author.display_name}**: {clean_content}")
-                else:
-                    messages.append(f"**{msg.author.display_name}**: {clean_content}")
-            
-            if messages:
-                guide_parts.append(f"\n## {chapter}\n" + "\n".join(messages))
-        
-        except Exception as e:
-            guide_parts.append(f"\n## {chapter}\n*Error retrieving messages*")
-    
-    # Return content WITHOUT spoiler tags - they'll be added when splitting
-    return "\n".join(guide_parts)
 
 async def get_reader_progress(book_club, guild):
     """Get a summary of which members are reading and their latest chapter"""
@@ -344,116 +369,14 @@ async def get_reader_progress(book_club, guild):
                 progress_percent = int(((latest_chapter_index + 1) / total_chapters) * 100)
                 reader_progress[member.display_name] = {
                     'chapter': latest_chapter,
-                    'progress': progress_percent
+                    'progress': progress_percent,
+                    'last_time': latest_time
                 }
         except:
             continue
     
     return reader_progress
 
-@tasks.loop(hours=24)  # Run once per day
-async def check_inactive_readers():
-    """Check for inactive readers and message them"""
-    print("Running inactivity check...")
-    two_weeks_ago = datetime.utcnow() - timedelta(days=14)
-    
-    for book_club_id, book_club in book_clubs.items():
-        # Skip archived book clubs
-        if book_club.is_archived:
-            continue
-        
-        try:
-            guild = bot.get_guild(book_club.guild_id)
-            if not guild:
-                continue
-            
-            for member_id in book_club.members:
-                # Skip if already marked inactive
-                if member_id in book_club.inactive_members:
-                    continue
-                
-                try:
-                    member = await guild.fetch_member(member_id)
-                    latest_time = None
-                    latest_chapter_index = -1
-                    total_chapters = len(book_club.chapters)
-                    
-                    # Find their most recent comment
-                    for i, thread_id in enumerate(book_club.thread_ids.values()):
-                        try:
-                            thread = await guild.fetch_channel(thread_id)
-                            async for msg in thread.history(limit=100):
-                                if msg.author.id == member_id and msg.type == discord.MessageType.default:
-                                    if latest_time is None or msg.created_at > latest_time:
-                                        latest_time = msg.created_at
-                                        latest_chapter_index = i
-                                    break
-                        except:
-                            continue
-                    
-                    # Check if they should be messaged
-                    if latest_time and latest_time < two_weeks_ago:
-                        # Don't message if they're on the last chapter (they likely finished)
-                        if latest_chapter_index >= total_chapters - 1:
-                            continue
-                        
-                        # Send DM asking if still reading
-                        try:
-                            dm_msg = await member.send(
-                                f"Hi! I noticed you haven't commented on **{book_club.book_name}** in over 2 weeks. "
-                                f"Are you still reading it? Reply with 'yes' or 'no'."
-                            )
-                            
-                            # Wait for response (24 hours)
-                            def check(m):
-                                return m.author.id == member_id and m.channel == dm_msg.channel
-                            
-                            try:
-                                response = await bot.wait_for('message', check=check, timeout=86400)  # 24 hours
-                                if response.content.lower() in ['no', 'n', 'nope', 'not anymore', 'stopped']:
-                                    # Mark as inactive
-                                    book_club.inactive_members.append(member_id)
-                                    save_book_clubs()
-                                    await member.send(f"Got it! I've removed you from the active readers list for **{book_club.book_name}**.")
-                            except asyncio.TimeoutError:
-                                # No response - assume still reading
-                                pass
-                        except discord.Forbidden:
-                            # Can't DM this user
-                            pass
-                
-                except:
-                    continue
-            
-            # Check if everyone has finished or stopped
-            active_readers = [m for m in book_club.members if m not in book_club.inactive_members]
-            if not active_readers and book_club.creator_id:
-                try:
-                    creator = await guild.fetch_member(book_club.creator_id)
-                    channel = await guild.fetch_channel(book_club.channel_id)
-                    await creator.send(
-                        f"Hey! It looks like everyone has either finished or stopped reading **{book_club.book_name}**. "
-                        f"You might want to archive it using `/archive_bookclub` in {channel.mention}."
-                    )
-                except:
-                    pass
-        
-        except Exception as e:
-            print(f"Error checking book club {book_club_id}: {e}")
-    
-    # Update all directories after inactivity check
-    for guild_id in directory_channels.keys():
-        try:
-            guild = bot.get_guild(guild_id)
-            if guild:
-                await update_book_club_list(guild)
-        except:
-            pass
-
-@check_inactive_readers.before_loop
-async def before_inactivity_check():
-    """Wait until bot is ready before starting the task"""
-    await bot.wait_until_ready()
 
 async def update_book_club_list(guild):
     """Update the public book club directory for a guild"""
@@ -476,7 +399,7 @@ async def update_book_club_list(guild):
     active_clubs = [bc for bc in all_book_clubs if not bc.is_archived]
     archived_clubs = [bc for bc in all_book_clubs if bc.is_archived]
     
-    # Check if we need to recreate messages (new book club added, structure changed, etc.)
+    # Check if we need to recreate messages
     needs_recreate = False
     if 'message_ids' not in directory_info or not directory_info['message_ids']:
         needs_recreate = True
@@ -502,7 +425,6 @@ async def update_book_club_list(guild):
     try:
         # Message 1: Active Book Clubs
         active_content = "# 📚 Active Book Clubs\n"
-        active_content += "*Use `/join_bookclub` to join an active book, or `/unarchive_bookclub` to revive a past one.*\n\n"
         if active_clubs:
             for book_club in sorted(active_clubs, key=lambda x: x.book_name):
                 try:
@@ -522,7 +444,7 @@ async def update_book_club_list(guild):
                     active_content += f"📖 **{book_club.book_name}** - *(channel not found)*\n\n"
         
         # Active legacy books
-        active_legacy = [bc for bc in manual_book_clubs.get(guild.id, []) if not bc.get('archived', True)]
+        active_legacy = [bc for bc in manual_book_clubs.get(guild.id, []) if not bc.get('archived', False)]
         for manual_club in sorted(active_legacy, key=lambda x: x['name']):
             try:
                 channel = await guild.fetch_channel(manual_club['channel_id'])
@@ -575,49 +497,38 @@ async def update_book_club_list(guild):
                     msg2 = await directory_channel.send(past_content)
                     message_ids[1] = msg2.id
         
-        # Message 3+: Legacy Book Clubs (if any) - split into multiple messages if needed
+        # Message 3+: Legacy Book Clubs (if any)
+        archived_legacy = [bc for bc in manual_book_clubs.get(guild.id, []) if bc.get('archived', False)]
         legacy_start_index = 2 if archived_clubs else 1
         
         if guild.id in manual_book_clubs and manual_book_clubs[guild.id]:
-            legacy_clubs = sorted(manual_book_clubs[guild.id], key=lambda x: x['name'])
+            all_legacy = sorted(manual_book_clubs[guild.id], key=lambda x: x['name'])
             
-            # Split into chunks of 20 book clubs per message
-            chunk_size = 20
-            legacy_msg_index = legacy_start_index
-            
-            for i in range(0, len(legacy_clubs), chunk_size):
-                chunk = legacy_clubs[i:i + chunk_size]
+            if all_legacy:
+                legacy_content = "# 📚 Legacy Book Clubs\n\n*These channels were created manually and are not managed by the bot.*\n\n"
                 
-                # First message includes header
-                if i == 0:
-                    legacy_content = "# 📚 Legacy Book Clubs\n\n*These channels were created manually and are not managed by the bot.*\n\n"
-                else:
-                    legacy_content = ""
-                
-                for manual_club in chunk:
+                for manual_club in all_legacy:
                     try:
                         channel = await guild.fetch_channel(manual_club['channel_id'])
                         legacy_content += f"📘 **{manual_club['name']}** - <#{channel.id}>\n"
                     except:
                         legacy_content += f"📘 **{manual_club['name']}** - *(channel not found)*\n"
                 
-                if needs_recreate or len(message_ids) <= legacy_msg_index:
+                if needs_recreate or len(message_ids) <= legacy_start_index:
                     msg_legacy = await directory_channel.send(legacy_content)
-                    if len(message_ids) <= legacy_msg_index:
+                    if len(message_ids) <= legacy_start_index:
                         message_ids.append(msg_legacy.id)
                     else:
-                        message_ids[legacy_msg_index] = msg_legacy.id
+                        message_ids[legacy_start_index] = msg_legacy.id
                 else:
                     # Edit existing message
                     try:
-                        msg_legacy = await directory_channel.fetch_message(message_ids[legacy_msg_index])
+                        msg_legacy = await directory_channel.fetch_message(message_ids[legacy_start_index])
                         await msg_legacy.edit(content=legacy_content)
                     except:
                         # Message was deleted, recreate
                         msg_legacy = await directory_channel.send(legacy_content)
-                        message_ids[legacy_msg_index] = msg_legacy.id
-                
-                legacy_msg_index += 1
+                        message_ids[legacy_start_index] = msg_legacy.id
         
         # Save the message IDs
         directory_channels[guild.id]['message_ids'] = message_ids
@@ -628,88 +539,189 @@ async def update_book_club_list(guild):
     except Exception as e:
         print(f"Error updating book club directory: {e}")
 
-    """Update the live discussion guide, splitting into multiple messages if needed"""
-    if not book_club.guide_message_ids:
+
+# ==================== BOT EVENTS ====================
+
+@client.event
+async def on_ready():
+    """Bot startup"""
+    print(f'{client.user} is now running!')
+    
+    # Load all data
+    load_book_clubs()
+    load_directories()
+    load_archive_categories()
+    load_manual_book_clubs()
+    load_active_categories()
+    
+    print(f'Loaded {len(book_clubs)} book club(s)')
+    print(f'Loaded {len(directory_channels)} directory channel(s)')
+    print(f'Loaded {len(archive_categories)} archive category(ies)')
+    print(f'Loaded {len(active_categories)} active category(ies)')
+    print(f'Loaded {len(manual_book_clubs)} guild(s) with manual book clubs')
+    
+    # Sync commands
+    try:
+        synced = await tree.sync()
+        print(f'Synced {len(synced)} command(s)')
+    except Exception as e:
+        print(f'Error syncing commands: {e}')
+    
+    # Start the inactivity check task
+    if not check_inactive_readers.is_running():
+        check_inactive_readers.start()
+
+
+@client.event
+async def on_message(message):
+    """Handle new messages in threads"""
+    # Ignore bot messages
+    if message.author.bot:
         return
     
-    try:
-        channel = await guild.fetch_channel(book_club.channel_id)
-        guide_content = await generate_guide_content(book_club, guild)
+    # Check if message is in a thread that belongs to a book club
+    if isinstance(message.channel, discord.Thread):
+        # Find which book club this thread belongs to
+        for book_club_id, book_club in book_clubs.items():
+            if message.channel.id in book_club.thread_ids.values():
+                # Update the discussion guide
+                await update_discussion_guide(book_club, message.guild)
+                # Update the directory (for reader progress)
+                await update_book_club_list(message.guild)
+                break
+
+
+@client.event
+async def on_message_edit(before, after):
+    """Handle edited messages in threads"""
+    # Ignore bot messages
+    if after.author.bot:
+        return
+    
+    # Check if edited message is in a thread that belongs to a book club
+    if isinstance(after.channel, discord.Thread):
+        # Find which book club this thread belongs to
+        for book_club_id, book_club in book_clubs.items():
+            if after.channel.id in book_club.thread_ids.values():
+                # Update the discussion guide
+                await update_discussion_guide(book_club, after.guild)
+                # Update the directory (for reader progress)
+                await update_book_club_list(after.guild)
+                break
+
+
+# ==================== BACKGROUND TASKS ====================
+
+@tasks.loop(hours=24)  # Run once per day
+async def check_inactive_readers():
+    """Check for inactive readers and message them"""
+    print("Running inactivity check...")
+    two_weeks_ago = datetime.utcnow() - timedelta(days=14)
+    
+    for book_club_id, book_club in book_clubs.items():
+        # Skip archived book clubs
+        if book_club.is_archived:
+            continue
         
-        # Split content into chunks of ~1900 characters (leaving buffer for safety)
-        chunks = split_into_chunks(guide_content, 1900)
-        
-        # Update existing messages or create new ones
-        for i, chunk in enumerate(chunks):
-            if i < len(book_club.guide_message_ids):
-                # Update existing message
+        try:
+            guild = client.get_guild(book_club.guild_id)
+            if not guild:
+                continue
+            
+            for member_id in book_club.members:
+                # Skip if already marked inactive
+                if member_id in book_club.inactive_members:
+                    continue
+                
                 try:
-                    msg = await channel.fetch_message(book_club.guide_message_ids[i])
-                    await msg.edit(content=chunk)
+                    member = await guild.fetch_member(member_id)
+                    latest_time = None
+                    latest_chapter_index = -1
+                    total_chapters = len(book_club.chapters)
+                    
+                    # Find their most recent comment
+                    for i, thread_id in enumerate(book_club.thread_ids.values()):
+                        try:
+                            thread = await guild.fetch_channel(thread_id)
+                            async for msg in thread.history(limit=100):
+                                if msg.author.id == member_id and msg.type == discord.MessageType.default:
+                                    if latest_time is None or msg.created_at > latest_time:
+                                        latest_time = msg.created_at
+                                        latest_chapter_index = i
+                                    break
+                        except:
+                            continue
+                    
+                    # Check if they should be messaged
+                    if latest_time and latest_time < two_weeks_ago:
+                        # Don't message if they're on the last chapter (they likely finished)
+                        if latest_chapter_index >= total_chapters - 1:
+                            continue
+                        
+                        # Send DM asking if still reading
+                        try:
+                            dm_msg = await member.send(
+                                f"Hi! I noticed you haven't commented on **{book_club.book_name}** in over 2 weeks. "
+                                f"Are you still reading it? Reply with 'yes' or 'no'."
+                            )
+                            
+                            # Wait for response (24 hours)
+                            def check(m):
+                                return m.author.id == member_id and m.channel == dm_msg.channel
+                            
+                            try:
+                                response = await client.wait_for('message', check=check, timeout=86400)  # 24 hours
+                                if response.content.lower() in ['no', 'n', 'nope', 'not anymore', 'stopped']:
+                                    # Mark as inactive
+                                    book_club.inactive_members.append(member_id)
+                                    save_book_clubs()
+                                    await member.send(f"Got it! I've removed you from the active readers list for **{book_club.book_name}**.")
+                            except asyncio.TimeoutError:
+                                # No response - assume still reading
+                                pass
+                        except discord.Forbidden:
+                            # Can't DM this user
+                            pass
+                
                 except:
-                    # If message was deleted, create a new one
-                    new_msg = await channel.send(chunk)
-                    book_club.guide_message_ids[i] = new_msg.id
-            else:
-                # Create new message for additional chunks
-                new_msg = await channel.send(chunk)
-                book_club.guide_message_ids.append(new_msg.id)
-        
-        # Delete extra messages if content got shorter
-        if len(chunks) < len(book_club.guide_message_ids):
-            for i in range(len(chunks), len(book_club.guide_message_ids)):
+                    continue
+            
+            # Check if everyone has finished or stopped
+            active_readers = [m for m in book_club.members if m not in book_club.inactive_members]
+            if not active_readers and book_club.creator_id and book_club_id not in inactivity_notified:
                 try:
-                    msg = await channel.fetch_message(book_club.guide_message_ids[i])
-                    await msg.delete()
+                    creator = await guild.fetch_member(book_club.creator_id)
+                    channel = await guild.fetch_channel(book_club.channel_id)
+                    await creator.send(
+                        f"Hey! It looks like everyone has either finished or stopped reading **{book_club.book_name}**. "
+                        f"You might want to archive it using `/archive_bookclub` in {channel.mention}."
+                    )
+                    inactivity_notified.add(book_club_id)
                 except:
                     pass
-            book_club.guide_message_ids = book_club.guide_message_ids[:len(chunks)]
+        
+        except Exception as e:
+            print(f"Error checking book club {book_club_id}: {e}")
     
-    except Exception as e:
-        print(f"Error updating discussion guide: {e}")
+    # Update all directories after inactivity check
+    for guild_id in directory_channels.keys():
+        try:
+            guild = client.get_guild(guild_id)
+            if guild:
+                await update_book_club_list(guild)
+        except:
+            pass
 
-def split_into_chunks(text, max_length):
-    """Split text into chunks at chapter boundaries when possible"""
-    if len(text) <= max_length:
-        return [text]
-    
-    chunks = []
-    current_chunk = ""
-    lines = text.split('\n')
-    
-    for line in lines:
-        # If adding this line would exceed limit
-        if len(current_chunk) + len(line) + 1 > max_length:
-            # If current chunk is not empty, save it
-            if current_chunk:
-                chunks.append(current_chunk.rstrip())
-                current_chunk = ""
-            
-            # If single line is too long, split it
-            if len(line) > max_length:
-                # Split long line into words
-                words = line.split(' ')
-                for word in words:
-                    if len(current_chunk) + len(word) + 1 > max_length:
-                        chunks.append(current_chunk.rstrip())
-                        current_chunk = word + " "
-                    else:
-                        current_chunk += word + " "
-            else:
-                current_chunk = line + "\n"
-        else:
-            current_chunk += line + "\n"
-    
-    # Add remaining chunk
-    if current_chunk:
-        chunks.append(current_chunk.rstrip())
-    
-    # Wrap each chunk in spoiler tags
-    wrapped_chunks = [f"||{chunk}||" for chunk in chunks]
-    
-    return wrapped_chunks
 
-@bot.tree.command(name="create_bookclub", description="Create a new book club channel and threads")
+@check_inactive_readers.before_loop
+async def before_inactivity_check():
+    """Wait until bot is ready before starting the task"""
+    await client.wait_until_ready()
+
+
+# ==================== SLASH COMMANDS ====================
+
+@tree.command(name="create_bookclub", description="Create a new book club channel and threads")
 async def create_bookclub(interaction: discord.Interaction):
     """Interactive command to create a book club"""
     await interaction.response.send_message("Let's set up your book club! I'll ask you some questions in this channel.", ephemeral=True)
@@ -723,21 +735,24 @@ async def create_bookclub(interaction: discord.Interaction):
     try:
         # Get book name
         await channel.send(f"{user.mention} What's the name of the book?")
-        book_msg = await bot.wait_for('message', check=check, timeout=120.0)
+        book_msg = await client.wait_for('message', check=check, timeout=120.0)
         book_name = book_msg.content
+        await book_msg.delete()
         
         # Get chapter information
         await channel.send("Enter chapters in format: 'Prologue, 1-5, Epilogue' (supports text, numbers, or ranges)")
-        chapters_msg = await bot.wait_for('message', check=check, timeout=120.0)
+        chapters_msg = await client.wait_for('message', check=check, timeout=120.0)
         chapter_input = chapters_msg.content
+        await chapters_msg.delete()
         
         # Parse the chapter string
         chapters = parse_chapters(chapter_input)
         
         # Get members
         await channel.send("Mention all members who should have access (mention them with @, separated by spaces). Example: @user1 @user2 @user3")
-        members_msg = await bot.wait_for('message', check=check, timeout=180.0)
+        members_msg = await client.wait_for('message', check=check, timeout=180.0)
         members = members_msg.mentions
+        await members_msg.delete()
         
         if not members:
             await channel.send("No valid members mentioned. Aborting.")
@@ -770,7 +785,7 @@ async def create_bookclub(interaction: discord.Interaction):
         
         # Create threads for each chapter
         thread_ids = {}
-        thread_objects = {}  # Store thread objects for navigation links
+        thread_objects = {}
         
         for chapter in chapters:
             # Create a message for the thread
@@ -814,14 +829,14 @@ async def create_bookclub(interaction: discord.Interaction):
         # Create initial discussion guide message
         guide_msg = await book_channel.send(f"# Discussion Guide: {book_name}\n||*No comments yet. The guide will update automatically as people comment!*||")
         
-        # Store book club data
+        # Store book club data (matching existing bot format)
         book_club_id = f"{guild.id}_{book_channel.id}"
         book_clubs[book_club_id] = BookClub(
             guild.id,
             book_name,
             book_channel.id,
             thread_ids,
-            [m.id for m in members],
+            [m.id for m in members],  # Store as integers
             chapters,
             [guide_msg.id],
             False,  # is_archived
@@ -838,299 +853,11 @@ async def create_bookclub(interaction: discord.Interaction):
         
     except asyncio.TimeoutError:
         await channel.send("Setup timed out. Please try again.")
-    except ValueError:
-        await channel.send("Invalid input. Please use the command again and enter a valid number.")
     except Exception as e:
         await channel.send(f"An error occurred: {str(e)}")
 
-@bot.tree.command(name="sync_commands", description="Force re-sync all bot commands with Discord")
-async def sync_commands(interaction: discord.Interaction):
-    """Force re-sync all commands with Discord"""
-    await interaction.response.defer(ephemeral=True)
-    try:
-        # Sync globally
-        global_synced = await bot.tree.sync()
-        # Also sync to this specific guild for instant update
-        guild_synced = await bot.tree.sync(guild=interaction.guild)
-        await interaction.followup.send(f"✅ Synced {len(global_synced)} global and {len(guild_synced)} guild command(s). Guild commands update instantly!", ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"Error syncing commands: {str(e)}", ephemeral=True)
 
-@bot.tree.command(name="set_directory", description="Set this channel as the book club directory")
-async def set_directory(interaction: discord.Interaction):
-    """Set the current channel as the book club directory"""
-    guild = interaction.guild
-    channel = interaction.channel
-    
-    # Set this channel as the directory
-    directory_channels[guild.id] = {
-        'channel_id': channel.id,
-        'message_ids': []
-    }
-    save_directories()
-    
-    # Create/update the directory list
-    await update_book_club_list(guild)
-    
-    await interaction.response.send_message(f"✅ This channel is now the book club directory!", ephemeral=True)
-
-@bot.tree.command(name="set_archive_category", description="Set a category for archiving old book clubs")
-async def set_archive_category(interaction: discord.Interaction, category: discord.CategoryChannel):
-    """Set the category where archived book clubs will be moved"""
-    guild = interaction.guild
-    
-    # Store the archive category
-    archive_categories[guild.id] = category.id
-    save_archive_categories()
-    
-    await interaction.response.send_message(f"✅ Book clubs will be archived to **{category.name}**!", ephemeral=True)
-
-@bot.tree.command(name="set_active_category", description="Set a category for active book clubs")
-async def set_active_category(interaction: discord.Interaction, category: discord.CategoryChannel):
-    """Set the category where active book clubs should be placed"""
-    guild = interaction.guild
-    
-    # We'll store active categories similar to archive categories
-    if not hasattr(bot, 'active_categories'):
-        bot.active_categories = {}
-    
-    bot.active_categories[guild.id] = category.id
-    
-    # Save to a file
-    active_file = 'active_categories.json'
-    with open(active_file, 'w') as f:
-        json.dump(bot.active_categories, f, indent=2)
-    
-    await interaction.response.send_message(f"✅ Active book clubs will be moved to **{category.name}**!", ephemeral=True)
-
-@bot.tree.command(name="archive_bookclub", description="Archive this book club (moves to Old Books category)")
-async def archive_bookclub(interaction: discord.Interaction):
-    """Archive the current book club"""
-    # Check if current channel is a book club
-    book_club_id = f"{interaction.guild.id}_{interaction.channel.id}"
-    if book_club_id not in book_clubs:
-        await interaction.response.send_message("This command must be used in a book club channel.", ephemeral=True)
-        return
-    
-    # Check if archive category is set
-    if interaction.guild.id not in archive_categories:
-        await interaction.response.send_message("No archive category set! Use `/set_archive_category` first.", ephemeral=True)
-        return
-    
-    book_club = book_clubs[book_club_id]
-    
-    try:
-        # Get the archive category
-        archive_category = await interaction.guild.fetch_channel(archive_categories[interaction.guild.id])
-        
-        # Move the channel to the archive category
-        await interaction.channel.edit(category=archive_category)
-        
-        # Mark as archived
-        book_club.is_archived = True
-        save_book_clubs()
-        
-        # Update the directory
-        await update_book_club_list(interaction.guild)
-        
-        await interaction.response.send_message(f"✅ Book club archived and moved to **{archive_category.name}**!", ephemeral=True)
-    
-    except Exception as e:
-        await interaction.response.send_message(f"Error archiving book club: {str(e)}", ephemeral=True)
-
-@bot.tree.command(name="join_bookclub", description="Join an active book club")
-async def join_bookclub(interaction: discord.Interaction):
-    """Join an active book club by selecting from a list"""
-    # Get all active book clubs for this guild
-    guild_book_clubs = [bc for bc in book_clubs.values() if bc.guild_id == interaction.guild.id and not bc.is_archived]
-    
-    if not guild_book_clubs:
-        await interaction.response.send_message("No active book clubs available to join.", ephemeral=True)
-        return
-    
-    # Sort by book name
-    guild_book_clubs.sort(key=lambda x: x.book_name)
-    
-    # Create a dropdown with book club options (max 25 for Discord select menus)
-    if len(guild_book_clubs) > 25:
-        await interaction.response.send_message(
-            "There are too many book clubs to display in a menu. Please use `/add_member` with a specific channel.",
-            ephemeral=True
-        )
-        return
-    
-    # Create select menu options
-    from discord import SelectOption
-    from discord.ui import Select, View
-    
-    options = []
-    book_club_map = {}
-    for i, bc in enumerate(guild_book_clubs):
-        # Check if user is already a member
-        is_member = interaction.user.id in bc.members
-        label = bc.book_name
-        if is_member:
-            label += " ✓"
-        
-        options.append(SelectOption(
-            label=label[:100],  # Discord max label length
-            description=f"{len(bc.chapters)} chapters" + (" - Already joined" if is_member else ""),
-            value=str(i)
-        ))
-        book_club_map[str(i)] = bc
-    
-    # Create the select menu
-    select = Select(
-        placeholder="Choose a book club to join...",
-        options=options
-    )
-    
-    async def select_callback(select_interaction):
-        selected_index = select.values[0]
-        selected_bc = book_club_map[selected_index]
-        
-        # Check if already a member
-        if select_interaction.user.id in selected_bc.members:
-            await select_interaction.response.send_message(
-                f"You're already a member of **{selected_bc.book_name}**!",
-                ephemeral=True
-            )
-            return
-        
-        # Add the user to the book club
-        try:
-            channel = await interaction.guild.fetch_channel(selected_bc.channel_id)
-            
-            # Add permissions to channel
-            await channel.set_permissions(select_interaction.user, read_messages=True, send_messages=True)
-            
-            # Add to all threads
-            for thread_id in selected_bc.thread_ids.values():
-                try:
-                    thread = await interaction.guild.fetch_channel(thread_id)
-                    await thread.add_user(select_interaction.user)
-                except:
-                    pass
-            
-            selected_bc.members.append(select_interaction.user.id)
-            save_book_clubs()
-            
-            await select_interaction.response.send_message(
-                f"✅ You've joined **{selected_bc.book_name}**! Check out {channel.mention}",
-                ephemeral=True
-            )
-        except Exception as e:
-            await select_interaction.response.send_message(
-                f"Error joining book club: {str(e)}",
-                ephemeral=True
-            )
-    
-    select.callback = select_callback
-    view = View()
-    view.add_item(select)
-    
-    await interaction.response.send_message(
-        "Select a book club to join:",
-        view=view,
-        ephemeral=True
-    )
-
-@bot.tree.command(name="unarchive_bookclub", description="Unarchive a book club (moves back to active)")
-async def unarchive_bookclub(interaction: discord.Interaction):
-    """Unarchive a book club by selecting from a list"""
-    # Get all archived bot-managed book clubs
-    archived_managed = [bc for bc in book_clubs.values() if bc.guild_id == interaction.guild.id and bc.is_archived]
-    # Get all archived legacy book clubs
-    archived_legacy = [bc for bc in manual_book_clubs.get(interaction.guild.id, []) if bc.get('archived', True)]
-    
-    if not archived_managed and not archived_legacy:
-        await interaction.response.send_message("No archived book clubs available to unarchive.", ephemeral=True)
-        return
-    
-    all_archived = []
-    for bc in sorted(archived_managed, key=lambda x: x.book_name):
-        all_archived.append({'type': 'managed', 'data': bc, 'name': bc.book_name})
-    for bc in sorted(archived_legacy, key=lambda x: x['name']):
-        all_archived.append({'type': 'legacy', 'data': bc, 'name': bc['name']})
-    
-    if len(all_archived) > 25:
-        await interaction.response.send_message(
-            "There are too many archived book clubs to display in a menu. Please contact an admin.",
-            ephemeral=True
-        )
-        return
-    
-    from discord import SelectOption
-    from discord.ui import Select, View
-    
-    options = []
-    for i, club in enumerate(all_archived):
-        label = club['name'] + (" 📘" if club['type'] == 'legacy' else "")
-        desc = "Legacy book club" if club['type'] == 'legacy' else f"{len(club['data'].chapters)} chapters"
-        options.append(SelectOption(label=label[:100], description=desc, value=str(i)))
-    
-    select = Select(placeholder="Choose a book club to unarchive...", options=options)
-    
-    async def select_callback(select_interaction):
-        await select_interaction.response.defer(ephemeral=True)
-        selected = all_archived[int(select.values[0])]
-        
-        try:
-            # Load active categories if needed
-            if not hasattr(bot, 'active_categories'):
-                bot.active_categories = {}
-                active_file = 'active_categories.json'
-                if os.path.exists(active_file):
-                    with open(active_file, 'r') as f:
-                        data = json.load(f)
-                        bot.active_categories = {int(k): int(v) for k, v in data.items()}
-            
-            if selected['type'] == 'managed':
-                bc = selected['data']
-                book_channel = await interaction.guild.fetch_channel(bc.channel_id)
-                
-                if interaction.guild.id in bot.active_categories:
-                    active_category = await interaction.guild.fetch_channel(bot.active_categories[interaction.guild.id])
-                    await book_channel.edit(category=active_category)
-                    message = f"✅ **{bc.book_name}** unarchived and moved to **{active_category.name}**! Check out {book_channel.mention}"
-                else:
-                    message = f"✅ **{bc.book_name}** unarchived! Check out {book_channel.mention}"
-                
-                bc.is_archived = False
-                save_book_clubs()
-            
-            else:
-                # Legacy book club
-                book_channel = await interaction.guild.fetch_channel(selected['data']['channel_id'])
-                
-                if interaction.guild.id in bot.active_categories:
-                    active_category = await interaction.guild.fetch_channel(bot.active_categories[interaction.guild.id])
-                    await book_channel.edit(category=active_category)
-                    message = f"✅ **{selected['name']}** unarchived and moved to **{active_category.name}**! Check out {book_channel.mention}"
-                else:
-                    message = f"✅ **{selected['name']}** unarchived! Check out {book_channel.mention}"
-                
-                # Mark legacy club as active
-                for club in manual_book_clubs.get(interaction.guild.id, []):
-                    if club['channel_id'] == selected['data']['channel_id']:
-                        club['archived'] = False
-                        break
-                save_manual_book_clubs()
-            
-            # Update the directory
-            await update_book_club_list(interaction.guild)
-            await select_interaction.followup.send(message, ephemeral=True)
-        
-        except Exception as e:
-            await select_interaction.followup.send(f"Error unarchiving book club: {str(e)}", ephemeral=True)
-    
-    select.callback = select_callback
-    view = View()
-    view.add_item(select)
-    
-    await interaction.response.send_message("Select a book club to unarchive:", view=view, ephemeral=True)
-
-@bot.tree.command(name="add_member", description="Add a member to a book club")
+@tree.command(name="add_member", description="Add a member to a book club")
 async def add_member(interaction: discord.Interaction, channel: discord.TextChannel, member: discord.Member):
     """Add a member to a book club"""
     await interaction.response.defer(ephemeral=True)
@@ -1166,6 +893,178 @@ async def add_member(interaction: discord.Interaction, channel: discord.TextChan
     
     await interaction.followup.send(f"✅ Added {member.mention} to {channel.mention}!", ephemeral=True)
 
-# Run the bot
-# Replace 'YOUR_BOT_TOKEN' with your actual Discord bot token
-bot.run('YOUR_BOT_TOKEN')
+
+@tree.command(name="set_directory", description="Set this channel as the book club directory")
+async def set_directory(interaction: discord.Interaction):
+    """Set the current channel as the book club directory"""
+    guild = interaction.guild
+    channel = interaction.channel
+    
+    # Set this channel as the directory (matching existing format)
+    directory_channels[guild.id] = {
+        'channel_id': channel.id,
+        'message_ids': []
+    }
+    save_directories()
+    
+    # Create/update the directory list
+    await update_book_club_list(guild)
+    
+    await interaction.response.send_message(f"✅ This channel is now the book club directory!", ephemeral=True)
+
+
+@tree.command(name="set_archive_category", description="Set a category for archiving old book clubs")
+async def set_archive_category(interaction: discord.Interaction, category: discord.CategoryChannel):
+    """Set the category where archived book clubs will be moved"""
+    guild = interaction.guild
+    
+    # Store the archive category
+    archive_categories[guild.id] = category.id
+    save_archive_categories()
+    
+    await interaction.response.send_message(f"✅ Book clubs will be archived to **{category.name}**!", ephemeral=True)
+
+
+@tree.command(name="set_active_category", description="Set a category for active book clubs")
+async def set_active_category(interaction: discord.Interaction, category: discord.CategoryChannel):
+    """Set the category where active book clubs should be placed"""
+    guild = interaction.guild
+    
+    active_categories[guild.id] = category.id
+    save_active_categories()
+    
+    await interaction.response.send_message(f"✅ Active book clubs will be moved to **{category.name}**!", ephemeral=True)
+
+
+@tree.command(name="archive_bookclub", description="Archive this book club (moves to archive category)")
+async def archive_bookclub(interaction: discord.Interaction):
+    """Archive the current book club"""
+    # Check if current channel is a book club
+    book_club_id = f"{interaction.guild.id}_{interaction.channel.id}"
+    if book_club_id not in book_clubs:
+        await interaction.response.send_message("This command must be used in a book club channel.", ephemeral=True)
+        return
+    
+    # Check if archive category is set
+    if interaction.guild.id not in archive_categories:
+        await interaction.response.send_message("No archive category set! Use `/set_archive_category` first.", ephemeral=True)
+        return
+    
+    book_club = book_clubs[book_club_id]
+    
+    try:
+        # Get the archive category
+        archive_category = await interaction.guild.fetch_channel(archive_categories[interaction.guild.id])
+        
+        # Move the channel to the archive category
+        await interaction.channel.edit(category=archive_category)
+        
+        # Mark as archived
+        book_club.is_archived = True
+        save_book_clubs()
+        
+        # Update the directory
+        await update_book_club_list(interaction.guild)
+        
+        await interaction.response.send_message(f"✅ Book club archived and moved to **{archive_category.name}**!", ephemeral=True)
+    
+    except Exception as e:
+        await interaction.response.send_message(f"Error archiving book club: {str(e)}", ephemeral=True)
+
+
+@tree.command(name="unarchive_bookclub", description="Unarchive a book club")
+async def unarchive_bookclub(interaction: discord.Interaction, channel: discord.TextChannel):
+    """Unarchive a book club"""
+    book_club_id = f"{interaction.guild.id}_{channel.id}"
+    guild_id = interaction.guild.id
+    
+    # Check if it's a bot-managed book club
+    if book_club_id in book_clubs:
+        book_club = book_clubs[book_club_id]
+        
+        # Move to active category if set
+        if guild_id in active_categories:
+            active_category = await interaction.guild.fetch_channel(active_categories[guild_id])
+            if active_category:
+                await channel.edit(category=active_category)
+        
+        # Mark as active
+        book_club.is_archived = False
+        
+        # Remove from inactivity notified
+        if book_club_id in inactivity_notified:
+            inactivity_notified.discard(book_club_id)
+        
+        save_book_clubs()
+        
+        # Update directory
+        await update_book_club_list(interaction.guild)
+        
+        await interaction.response.send_message(f"✅ {channel.mention} unarchived!", ephemeral=True)
+    
+    # Check if it's a legacy book club
+    elif guild_id in manual_book_clubs:
+        for club in manual_book_clubs[guild_id]:
+            if club['channel_id'] == channel.id:
+                # Move to active category if set
+                if guild_id in active_categories:
+                    active_category = await interaction.guild.fetch_channel(active_categories[guild_id])
+                    if active_category:
+                        await channel.edit(category=active_category)
+                
+                # Mark as active
+                club['archived'] = False
+                save_manual_book_clubs()
+                
+                # Update directory
+                await update_book_club_list(interaction.guild)
+                
+                await interaction.response.send_message(f"✅ {channel.mention} unarchived!", ephemeral=True)
+                return
+        
+        await interaction.response.send_message("This channel is not a book club.", ephemeral=True)
+    else:
+        await interaction.response.send_message("This channel is not a book club.", ephemeral=True)
+
+
+@tree.command(name="import_legacy_books", description="Import manually created book club channels")
+async def import_legacy_books(interaction: discord.Interaction, category: discord.CategoryChannel):
+    """Import legacy book clubs"""
+    guild_id = interaction.guild.id
+    
+    if guild_id not in manual_book_clubs:
+        manual_book_clubs[guild_id] = []
+    
+    imported = 0
+    for channel in category.text_channels:
+        channel_id = channel.id
+        
+        # Skip if already a bot-managed book club
+        if f"{guild_id}_{channel_id}" in book_clubs:
+            continue
+        
+        # Skip if already imported
+        if any(club['channel_id'] == channel_id for club in manual_book_clubs[guild_id]):
+            continue
+        
+        # Convert channel name to readable title
+        book_name = channel.name.replace('-', ' ').title()
+        manual_book_clubs[guild_id].append({
+            'name': book_name,
+            'channel_id': channel_id,
+            'archived': False
+        })
+        imported += 1
+    
+    save_manual_book_clubs()
+    
+    # Update directory
+    await update_book_club_list(interaction.guild)
+    
+    await interaction.response.send_message(f"✅ Imported {imported} legacy book club(s)!", ephemeral=True)
+
+
+# ==================== RUN BOT ====================
+
+# Replace with your actual bot token
+client.run('YOUR_BOT_TOKEN')
